@@ -25,13 +25,14 @@ export default function RootLayout() {
   return (
     <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
       <Stack>
-        <Stack.Screen
-          name="index"
-          options={{ headerShown: true, headerTitle: "foodai" }}
-        />
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="recipe/[id]" options={{ headerShown: false }} />
+        <Stack.Screen name="create-recipe" options={{ headerBackTitle: "Cook" }} />
+        <Stack.Screen name="create-recipe-url" options={{ headerTitle: "Import from URL", headerBackTitle: "Back" }} />
+        <Stack.Screen name="create-recipe-social" options={{ headerTitle: "Social / Screenshot", headerBackTitle: "Back" }} />
         <Stack.Screen name="+not-found" />
       </Stack>
-      <StatusBar style="auto" />
+      <StatusBar style="dark" />
     </ThemeProvider>
   );
 }
