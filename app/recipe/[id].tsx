@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FlatList,
   Modal,
@@ -13,6 +13,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { RECIPES, Recipe, RecipeStep } from "@/lib/mockData";
+import { detectDurationFromText } from "@/lib/detectDuration";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -98,6 +99,8 @@ function IngredientsSheet({
 
 // ── Instruction Modal ──────────────────────────────────────────────────────────
 
+const CARD_HEIGHT = 96; // minHeight 80 + marginBottom 8 + gap 8
+
 function InstructionModal({
   visible,
   onClose,
@@ -115,6 +118,10 @@ function InstructionModal({
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const [showIngSheet, setShowIngSheet] = useState(false);
+  const [listHeight, setListHeight] = useState(300);
+  // LLM-detected durations keyed by step index (null = no time found)
+  const [detectedDurations, setDetectedDurations] = useState<Map<number, number | null>>(new Map());
+  const [detecting, setDetecting] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const currentStep = steps[activeStep];
@@ -124,7 +131,18 @@ function InstructionModal({
     if (visible) {
       setActiveStep(0);
       setTimerRunning(false);
+      setDetectedDurations(new Map());
+      setDetecting(false);
       setTimerSeconds(steps[0]?.duration ?? null);
+      // Kick off LLM detection for step 0 if it has no explicit duration
+      if (!steps[0]?.duration) {
+        setDetecting(true);
+        detectDurationFromText(steps[0]?.text ?? "").then((secs) => {
+          setDetectedDurations((prev) => new Map(prev).set(0, secs));
+          setTimerSeconds(secs);
+          setDetecting(false);
+        });
+      }
     }
   }, [visible]);
 
@@ -147,23 +165,93 @@ function InstructionModal({
     };
   }, [timerRunning]);
 
-  const handleStepSelect = (index: number) => {
-    setActiveStep(index);
-    if (timerRef.current) clearInterval(timerRef.current);
-    setTimerRunning(false);
-    setTimerSeconds(steps[index]?.duration ?? null);
-  };
+  const handleStepSelect = useCallback(
+    (index: number) => {
+      setActiveStep(index);
+      if (timerRef.current) clearInterval(timerRef.current);
+      setTimerRunning(false);
+
+      const step = steps[index];
+
+      if (step?.duration) {
+        // Explicit duration in the data — use it immediately
+        setTimerSeconds(step.duration);
+      } else if (detectedDurations.has(index)) {
+        // Already detected by LLM — use cached result
+        setTimerSeconds(detectedDurations.get(index) ?? null);
+      } else {
+        // No duration known — ask Claude Haiku
+        setTimerSeconds(null);
+        setDetecting(true);
+        detectDurationFromText(step?.text ?? "").then((secs) => {
+          setDetectedDurations((prev) => new Map(prev).set(index, secs));
+          setTimerSeconds(secs);
+          setDetecting(false);
+        });
+      }
+    },
+    [steps, detectedDurations]
+  );
+
+  const effectiveDuration: number | null =
+    currentStep?.duration ?? detectedDurations.get(activeStep) ?? null;
 
   const toggleTimer = () => {
     if (timerSeconds === 0) {
-      setTimerSeconds(currentStep.duration ?? null);
+      setTimerSeconds(effectiveDuration);
       setTimerRunning(false);
     } else {
       setTimerRunning((r) => !r);
     }
   };
 
-  const hasDuration = currentStep?.duration != null && currentStep.duration > 0;
+  const hasDuration = effectiveDuration !== null && effectiveDuration > 0;
+
+  // Dynamic snap: measure each card's rendered height and compute exact offsets.
+  // marginBottom (8) is not captured by onLayout, so we add it manually.
+  const MARGIN = 8;
+  const itemHeights = useRef<number[]>(new Array(steps.length).fill(CARD_HEIGHT));
+  const snapOffsetsRef = useRef<number[]>(steps.map((_, i) => i * CARD_HEIGHT));
+  const [snapOffsets, setSnapOffsets] = useState<number[]>(snapOffsetsRef.current);
+
+  const recomputeOffsets = useCallback(() => {
+    const offsets: number[] = [];
+    let total = 0;
+    for (const h of itemHeights.current) {
+      offsets.push(total);
+      total += h + MARGIN;
+    }
+    snapOffsetsRef.current = offsets;
+    setSnapOffsets([...offsets]);
+  }, []);
+
+  const handleItemLayout = useCallback(
+    (index: number, height: number) => {
+      if (itemHeights.current[index] !== height) {
+        itemHeights.current[index] = height;
+        recomputeOffsets();
+      }
+    },
+    [recomputeOffsets]
+  );
+
+  const onMomentumScrollEnd = useCallback(
+    (e: { nativeEvent: { contentOffset: { y: number } } }) => {
+      const y = e.nativeEvent.contentOffset.y;
+      const offsets = snapOffsetsRef.current;
+      let best = 0;
+      let bestDiff = Infinity;
+      offsets.forEach((offset, i) => {
+        const diff = Math.abs(offset - y);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = i;
+        }
+      });
+      handleStepSelect(best);
+    },
+    [handleStepSelect]
+  );
 
   return (
     <Modal
@@ -204,7 +292,7 @@ function InstructionModal({
             overflow: "hidden",
             backgroundColor: "#2a2a2a",
             aspectRatio: 16 / 9,
-            marginBottom: 16,
+            marginBottom: 8,
           }}
         >
           {currentStep?.imageUrl ? (
@@ -217,6 +305,27 @@ function InstructionModal({
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 8 }}>
               <Ionicons name="image-outline" size={36} color="#555" />
               <Text style={{ color: "#555", fontSize: 13 }}>No image for this step</Text>
+            </View>
+          )}
+
+          {/* Detecting spinner */}
+          {detecting && !hasDuration && (
+            <View
+              style={{
+                position: "absolute",
+                bottom: 10,
+                right: 10,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 6,
+                backgroundColor: "rgba(0,0,0,0.78)",
+                borderRadius: 999,
+                paddingVertical: 6,
+                paddingHorizontal: 12,
+              }}
+            >
+              <Ionicons name="time-outline" size={13} color="#aaa" />
+              <Text style={{ color: "#aaa", fontSize: 13 }}>detecting…</Text>
             </View>
           )}
 
@@ -253,25 +362,59 @@ function InstructionModal({
               >
                 {timerSeconds !== null
                   ? formatTime(timerSeconds)
-                  : formatTime(currentStep.duration!)}
+                  : formatTime(effectiveDuration!)}
               </Text>
             </TouchableOpacity>
           )}
         </View>
 
-        {/* Step cards */}
+        {/* Step counter */}
+        <Text
+          style={{
+            color: "#555",
+            fontSize: 12,
+            textAlign: "center",
+            marginBottom: 10,
+            fontWeight: "500",
+          }}
+        >
+          Step {activeStep + 1} of {steps.length}
+        </Text>
+
+        {/* Swipeable step list — snapToOffsets handles variable card heights */}
         <FlatList
           data={steps}
           keyExtractor={(_, i) => String(i)}
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16 }}
-          ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+          snapToOffsets={snapOffsets}
+          decelerationRate="fast"
+          disableIntervalMomentum
+          onMomentumScrollEnd={onMomentumScrollEnd}
+          onLayout={(e) => setListHeight(e.nativeEvent.layout.height)}
+          ListFooterComponent={
+            <View
+              style={{
+                height: Math.max(
+                  0,
+                  listHeight - itemHeights.current[steps.length - 1]
+                ),
+              }}
+            />
+          }
+          contentContainerStyle={{ paddingHorizontal: 16 }}
+          showsVerticalScrollIndicator={false}
           renderItem={({ item, index }) => {
             const isActive = activeStep === index;
             return (
               <TouchableOpacity
+                onLayout={(e) =>
+                  handleItemLayout(index, e.nativeEvent.layout.height)
+                }
                 onPress={() => handleStepSelect(index)}
-                activeOpacity={0.85}
+                activeOpacity={0.9}
                 style={{
+                  minHeight: 80,
+                  marginBottom: 8,
+                  opacity: isActive ? 1 : 0.4,
                   backgroundColor: isActive ? "#2d2d2d" : "#1c1c1c",
                   borderRadius: 14,
                   padding: 14,
@@ -308,7 +451,7 @@ function InstructionModal({
                 <Text
                   style={{
                     flex: 1,
-                    color: isActive ? "#fff" : "#777",
+                    color: isActive ? "#fff" : "#999",
                     fontSize: 14,
                     lineHeight: 21,
                   }}
