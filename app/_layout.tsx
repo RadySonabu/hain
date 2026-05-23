@@ -10,6 +10,7 @@ import { StatusBar } from "expo-status-bar";
 import "react-native-reanimated";
 
 import { useColorScheme } from "@/hooks/useColorScheme";
+import { ModelProvider } from "@/src/context/ModelContext";
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -18,21 +19,23 @@ export default function RootLayout() {
   });
 
   if (!loaded) {
-    // Async font loading only occurs in development.
     return null;
   }
 
   return (
-    <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="recipe/[id]" options={{ headerShown: false }} />
-        <Stack.Screen name="create-recipe" options={{ headerBackTitle: "Cook" }} />
-        <Stack.Screen name="create-recipe-url" options={{ headerTitle: "Import from URL", headerBackTitle: "Back" }} />
-        <Stack.Screen name="create-recipe-social" options={{ headerTitle: "Social / Screenshot", headerBackTitle: "Back" }} />
-        <Stack.Screen name="+not-found" />
-      </Stack>
-      <StatusBar style="dark" />
-    </ThemeProvider>
+    <ModelProvider>
+      <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="recipe/[id]" options={{ headerShown: false }} />
+          <Stack.Screen name="create-recipe" options={{ headerBackTitle: "Cook" }} />
+          <Stack.Screen name="create-recipe-url" options={{ headerTitle: "Import from URL", headerBackTitle: "Back" }} />
+          <Stack.Screen name="create-recipe-social" options={{ headerTitle: "Social / Screenshot", headerBackTitle: "Back" }} />
+          <Stack.Screen name="describe-recipe" options={{ headerTitle: "Describe Recipe", headerBackTitle: "Back" }} />
+          <Stack.Screen name="+not-found" />
+        </Stack>
+        <StatusBar style="dark" />
+      </ThemeProvider>
+    </ModelProvider>
   );
 }

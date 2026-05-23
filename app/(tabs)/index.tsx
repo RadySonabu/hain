@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { FlatList, Text, TouchableOpacity, View } from "react-native";
 import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { RECIPES, Recipe } from "@/lib/mockData";
+import { getUserRecipes } from "@/lib/recipeStore";
 
 function PostCard({ post, onImagePress }: { post: Recipe; onImagePress: () => void }) {
   const [liked, setLiked] = useState(false);
@@ -84,6 +85,20 @@ function PostCard({ post, onImagePress }: { post: Recipe; onImagePress: () => vo
 
 export default function HomeScreen() {
   const router = useRouter();
+  const [publicUserRecipes, setPublicUserRecipes] = useState<Recipe[]>([]);
+
+  useFocusEffect(
+    useCallback(() => {
+      getUserRecipes().then((all) =>
+        setPublicUserRecipes(all.filter((r) => r.isPublic))
+      );
+    }, [])
+  );
+
+  const feedRecipes = useMemo(
+    () => [...RECIPES, ...publicUserRecipes],
+    [publicUserRecipes]
+  );
 
   return (
     <SafeAreaView className="flex-1 bg-white" edges={["top"]}>
@@ -110,7 +125,7 @@ export default function HomeScreen() {
 
       {/* Feed */}
       <FlatList
-        data={RECIPES}
+        data={feedRecipes}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
           <PostCard

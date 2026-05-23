@@ -9,14 +9,16 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ardyubanos.foodai"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.ardyubanos.foodai"
     },
     "web": {
       "bundler": "metro",
@@ -25,6 +27,7 @@
     },
     "plugins": [
       "expo-router",
+      "./plugins/withFoundationModels",
       [
         "expo-splash-screen",
         {

@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
+  Alert,
   FlatList,
   Modal,
   ScrollView,
@@ -11,8 +12,9 @@ import {
 import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { RECIPES, Recipe } from "@/lib/mockData";
+import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
 
 const CATEGORIES = ["All", "Breakfast", "Pasta", "Vegan", "Quick", "Dessert"];
 
@@ -63,26 +65,60 @@ function OptionCard({
   );
 }
 
-function RecipeCard({ recipe, onPress }: { recipe: Recipe; onPress: () => void }) {
+function RecipeCard({
+  recipe,
+  onPress,
+  onLongPress,
+}: {
+  recipe: Recipe;
+  onPress: () => void;
+  onLongPress?: () => void;
+}) {
   return (
-    <TouchableOpacity className="flex-1 mb-4" onPress={onPress} activeOpacity={0.88}>
-      <Image
-        source={{ uri: recipe.imageUrl }}
-        style={{ width: "100%", aspectRatio: 1, borderRadius: 12 }}
-        contentFit="cover"
-      />
+    <TouchableOpacity
+      className="flex-1 mb-4"
+      onPress={onPress}
+      onLongPress={onLongPress}
+      activeOpacity={0.88}
+      delayLongPress={400}
+    >
+      <View style={{ position: "relative" }}>
+        <Image
+          source={{ uri: recipe.imageUrl }}
+          style={{ width: "100%", aspectRatio: 1, borderRadius: 12 }}
+          contentFit="cover"
+        />
+        {recipe.isUserCreated && !recipe.isPublic && (
+          <View
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              backgroundColor: "rgba(0,0,0,0.55)",
+              borderRadius: 999,
+              padding: 4,
+            }}
+          >
+            <Ionicons name="lock-closed" size={12} color="#fff" />
+          </View>
+        )}
+      </View>
       <Text className="font-bold text-black text-sm mt-2" numberOfLines={1}>
         {recipe.title}
       </Text>
       <View className="flex-row items-center gap-3 mt-1">
-        <View className="flex-row items-center gap-1">
-          <Ionicons name="time-outline" size={12} color="#9ca3af" />
-          <Text className="text-xs text-gray-400">{recipe.cookTime}</Text>
-        </View>
-        <View className="flex-row items-center gap-1">
-          <Ionicons name="star" size={12} color="#F5A623" />
-          <Text className="text-xs text-gray-400">{recipe.rating}</Text>
-        </View>
+        {recipe.cookTime ? (
+          <View className="flex-row items-center gap-1">
+            <Ionicons name="time-outline" size={12} color="#9ca3af" />
+            <Text className="text-xs text-gray-400">{recipe.cookTime}</Text>
+          </View>
+        ) : null}
+        {recipe.rating > 0 ? (
+          <View className="flex-row items-center gap-1">
+            <Ionicons name="star" size={12} color="#F5A623" />
+            <Text className="text-xs text-gray-400">{recipe.rating}</Text>
+          </View>
+        ) : null}
       </View>
     </TouchableOpacity>
   );
@@ -93,14 +129,76 @@ export default function CookScreen() {
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showSheet, setShowSheet] = useState(false);
+  const [userRecipes, setUserRecipes] = useState<Recipe[]>([]);
+
+  useFocusEffect(
+    useCallback(() => {
+      getUserRecipes().then(setUserRecipes);
+    }, [])
+  );
+
+  const allRecipes = useMemo(
+    () => [...RECIPES, ...userRecipes],
+    [userRecipes]
+  );
 
   const filtered = useMemo(
     () =>
-      RECIPES.filter(
-        (r) => selectedCategory === "All" || r.category === selectedCategory
-      ).filter((r) => r.title.toLowerCase().includes(query.toLowerCase())),
-    [query, selectedCategory]
+      allRecipes
+        .filter(
+          (r) =>
+            selectedCategory === "All" ||
+            r.category === selectedCategory ||
+            (selectedCategory === "All" && r.isUserCreated)
+        )
+        .filter((r) => r.title.toLowerCase().includes(query.toLowerCase())),
+    [allRecipes, query, selectedCategory]
   );
+
+  const handleLongPress = (recipe: Recipe) => {
+    if (!recipe.isUserCreated) return;
+    Alert.alert(recipe.title, undefined, [
+      {
+        text: "Edit",
+        onPress: () =>
+          router.push({
+            pathname: "/create-recipe",
+            params: {
+              recipeId: recipe.id,
+              prefillTitle: recipe.title,
+              prefillDescription: recipe.description,
+              prefillIngredients: JSON.stringify(recipe.ingredients),
+              prefillSteps: JSON.stringify(recipe.steps.map((s) => s.text)),
+              prefillImage: recipe.imageUrl,
+              prefillCategory: recipe.category,
+              prefillDifficulty: recipe.difficulty ?? "",
+              prefillCookTime: recipe.cookTime,
+              prefillServings: String(recipe.servings),
+              prefillFlavors: JSON.stringify(recipe.primaryFlavors ?? []),
+              prefillAuthor: recipe.username,
+            },
+          }),
+      },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => {
+          Alert.alert("Delete Recipe", "Are you sure?", [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Delete",
+              style: "destructive",
+              onPress: async () => {
+                await deleteUserRecipe(recipe.id);
+                setUserRecipes((prev) => prev.filter((r) => r.id !== recipe.id));
+              },
+            },
+          ]);
+        },
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
 
   return (
     <SafeAreaView className="flex-1 bg-white" edges={["top"]}>
@@ -186,7 +284,11 @@ export default function CookScreen() {
             columnWrapperStyle={{ gap: 12, paddingHorizontal: 16 }}
             contentContainerStyle={{ paddingTop: 4, paddingBottom: 24 }}
             renderItem={({ item }) => (
-            <RecipeCard recipe={item} onPress={() => router.push(`/recipe/${item.id}`)} />
+            <RecipeCard
+              recipe={item}
+              onPress={() => router.push(`/recipe/${item.id}`)}
+              onLongPress={() => handleLongPress(item)}
+            />
           )}
             showsVerticalScrollIndicator={false}
           />
@@ -234,6 +336,12 @@ export default function CookScreen() {
             title="Social / Screenshot"
             subtitle="From Instagram, TikTok, or a photo"
             onPress={() => { setShowSheet(false); router.push("/create-recipe-social"); }}
+          />
+          <OptionCard
+            icon="sparkles-outline"
+            title="Describe with text"
+            subtitle="Type a recipe — Apple Intelligence fills the form"
+            onPress={() => { setShowSheet(false); router.push("/describe-recipe"); }}
           />
         </View>
       </Modal>

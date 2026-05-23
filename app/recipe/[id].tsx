@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Alert,
   FlatList,
   Modal,
+  PanResponder,
   Platform,
   ScrollView,
   Text,
@@ -13,6 +15,9 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { RECIPES, Recipe, RecipeStep } from "@/lib/mockData";
+import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
+import * as Notifications from "expo-notifications";
+import * as Haptics from "expo-haptics";
 import { detectDurationFromText } from "@/lib/detectDuration";
 
 function formatTime(seconds: number): string {
@@ -117,18 +122,25 @@ function InstructionModal({
   const [activeStep, setActiveStep] = useState(0);
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
-  const [showIngSheet, setShowIngSheet] = useState(false);
   const [listHeight, setListHeight] = useState(300);
   // LLM-detected durations keyed by step index (null = no time found)
   const [detectedDurations, setDetectedDurations] = useState<Map<number, number | null>>(new Map());
   const [detecting, setDetecting] = useState(false);
+  const insets = useSafeAreaInsets();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const flatListRef = useRef<FlatList>(null);
+  const activeStepRef = useRef(0);
+  const notifIdRef = useRef<string | null>(null);
 
   const currentStep = steps[activeStep];
 
   // Reset on open
   useEffect(() => {
     if (visible) {
+      if (notifIdRef.current) {
+        Notifications.cancelScheduledNotificationAsync(notifIdRef.current);
+        notifIdRef.current = null;
+      }
       setActiveStep(0);
       setTimerRunning(false);
       setDetectedDurations(new Map());
@@ -154,6 +166,8 @@ function InstructionModal({
           if (s !== null && s > 1) return s - 1;
           clearInterval(timerRef.current!);
           setTimerRunning(false);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          notifIdRef.current = null;
           return 0;
         });
       }, 1000);
@@ -167,9 +181,14 @@ function InstructionModal({
 
   const handleStepSelect = useCallback(
     (index: number) => {
+      activeStepRef.current = index;
       setActiveStep(index);
       if (timerRef.current) clearInterval(timerRef.current);
       setTimerRunning(false);
+      if (notifIdRef.current) {
+        Notifications.cancelScheduledNotificationAsync(notifIdRef.current);
+        notifIdRef.current = null;
+      }
 
       const step = steps[index];
 
@@ -196,12 +215,38 @@ function InstructionModal({
   const effectiveDuration: number | null =
     currentStep?.duration ?? detectedDurations.get(activeStep) ?? null;
 
-  const toggleTimer = () => {
+  const handleTimerTap = async () => {
     if (timerSeconds === 0) {
+      // Reset
       setTimerSeconds(effectiveDuration);
       setTimerRunning(false);
+      return;
+    }
+    if (timerRunning) {
+      // Pause — cancel scheduled notification
+      setTimerRunning(false);
+      if (notifIdRef.current) {
+        await Notifications.cancelScheduledNotificationAsync(notifIdRef.current);
+        notifIdRef.current = null;
+      }
     } else {
-      setTimerRunning((r) => !r);
+      // Start — schedule lock-screen notification
+      setTimerRunning(true);
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status === "granted" && timerSeconds !== null && timerSeconds > 0) {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "⏱ Timer done!",
+            body: currentStep?.text?.slice(0, 80) ?? "Step complete",
+            sound: true,
+          },
+          trigger: {
+            seconds: timerSeconds,
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          },
+        });
+        notifIdRef.current = id;
+      }
     }
   };
 
@@ -212,7 +257,6 @@ function InstructionModal({
   const MARGIN = 8;
   const itemHeights = useRef<number[]>(new Array(steps.length).fill(CARD_HEIGHT));
   const snapOffsetsRef = useRef<number[]>(steps.map((_, i) => i * CARD_HEIGHT));
-  const [snapOffsets, setSnapOffsets] = useState<number[]>(snapOffsetsRef.current);
 
   const recomputeOffsets = useCallback(() => {
     const offsets: number[] = [];
@@ -222,7 +266,6 @@ function InstructionModal({
       total += h + MARGIN;
     }
     snapOffsetsRef.current = offsets;
-    setSnapOffsets([...offsets]);
   }, []);
 
   const handleItemLayout = useCallback(
@@ -235,23 +278,35 @@ function InstructionModal({
     [recomputeOffsets]
   );
 
-  const onMomentumScrollEnd = useCallback(
-    (e: { nativeEvent: { contentOffset: { y: number } } }) => {
-      const y = e.nativeEvent.contentOffset.y;
-      const offsets = snapOffsetsRef.current;
-      let best = 0;
-      let bestDiff = Infinity;
-      offsets.forEach((offset, i) => {
-        const diff = Math.abs(offset - y);
-        if (diff < bestDiff) {
-          bestDiff = diff;
-          best = i;
-        }
-      });
-      handleStepSelect(best);
+  const scrollToStep = useCallback(
+    (index: number) => {
+      const clamped = Math.max(0, Math.min(steps.length - 1, index));
+      const offset = snapOffsetsRef.current[clamped] ?? 0;
+      flatListRef.current?.scrollToOffset({ offset, animated: true });
+      handleStepSelect(clamped);
     },
-    [handleStepSelect]
+    [steps.length, handleStepSelect]
   );
+
+  // Stable ref so the PanResponder closure (created once) calls the latest version
+  const scrollToStepRef = useRef(scrollToStep);
+  useEffect(() => { scrollToStepRef.current = scrollToStep; }, [scrollToStep]);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gs) => Math.abs(gs.dy) > 5,
+      onPanResponderRelease: (_, gs) => {
+        const { dy, vy } = gs;
+        const absDy = Math.abs(dy);
+        if (absDy < 8) return; // ignore accidental touches
+        const direction = dy < 0 ? 1 : -1; // swipe up = next, swipe down = prev
+        const isBig = Math.abs(vy) >= 0.5 || absDy >= 80;
+        const delta = isBig ? 3 : 1;
+        scrollToStepRef.current(activeStepRef.current + direction * delta);
+      },
+    })
+  ).current;
 
   return (
     <Modal
@@ -262,144 +317,94 @@ function InstructionModal({
     >
       <SafeAreaView
         style={{ flex: 1, backgroundColor: "#111" }}
-        edges={["top", "bottom"]}
+        edges={["bottom"]}
       >
-        {/* Header */}
+        {/* Header with step counter */}
         <View
           style={{
-            flexDirection: "row",
-            alignItems: "center",
+            paddingTop: insets.top + 10,
+            paddingBottom: 10,
             paddingHorizontal: 20,
-            paddingVertical: 14,
           }}
         >
-          <Text
-            style={{ flex: 1, color: "#fff", fontSize: 17, fontWeight: "700" }}
-            numberOfLines={1}
-          >
-            {title}
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Text
+              style={{ flex: 1, color: "#fff", fontSize: 17, fontWeight: "700" }}
+              numberOfLines={1}
+            >
+              {title}
+            </Text>
+            <TouchableOpacity onPress={onClose} style={{ marginLeft: 12 }}>
+              <Ionicons name="close" size={24} color="#fff" />
+            </TouchableOpacity>
+          </View>
+          <Text style={{ color: "#555", fontSize: 12, fontWeight: "500", marginTop: 4 }}>
+            Step {activeStep + 1} of {steps.length}
           </Text>
-          <TouchableOpacity onPress={onClose} style={{ marginLeft: 12 }}>
-            <Ionicons name="close" size={24} color="#fff" />
-          </TouchableOpacity>
         </View>
 
-        {/* Step media */}
-        <View
-          style={{
-            marginHorizontal: 16,
-            borderRadius: 16,
-            overflow: "hidden",
-            backgroundColor: "#2a2a2a",
-            aspectRatio: 16 / 9,
-            marginBottom: 8,
-          }}
-        >
-          {currentStep?.imageUrl ? (
-            <Image
-              source={{ uri: currentStep.imageUrl }}
-              style={{ width: "100%", height: "100%" }}
-              contentFit="cover"
-            />
-          ) : (
-            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <Ionicons name="image-outline" size={36} color="#555" />
-              <Text style={{ color: "#555", fontSize: 13 }}>No image for this step</Text>
-            </View>
-          )}
-
-          {/* Detecting spinner */}
-          {detecting && !hasDuration && (
+        {/* Circular timer — only shown when step has a duration */}
+        {hasDuration && (
+          <TouchableOpacity
+            onPress={handleTimerTap}
+            activeOpacity={0.85}
+            style={{ alignItems: "center", marginVertical: 16 }}
+          >
             <View
               style={{
-                position: "absolute",
-                bottom: 10,
-                right: 10,
-                flexDirection: "row",
+                width: 180,
+                height: 180,
+                borderRadius: 90,
+                backgroundColor:
+                  timerSeconds === 0
+                    ? "#14532d"
+                    : timerRunning
+                    ? "#1a1a1a"
+                    : "#2d2d2d",
                 alignItems: "center",
+                justifyContent: "center",
                 gap: 6,
-                backgroundColor: "rgba(0,0,0,0.78)",
-                borderRadius: 999,
-                paddingVertical: 6,
-                paddingHorizontal: 12,
               }}
             >
-              <Ionicons name="time-outline" size={13} color="#aaa" />
-              <Text style={{ color: "#aaa", fontSize: 13 }}>detecting…</Text>
-            </View>
-          )}
-
-          {/* Timer pill overlay */}
-          {hasDuration && (
-            <TouchableOpacity
-              onPress={toggleTimer}
-              style={{
-                position: "absolute",
-                bottom: 10,
-                right: 10,
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 6,
-                backgroundColor: "rgba(0,0,0,0.78)",
-                borderRadius: 999,
-                paddingVertical: 6,
-                paddingHorizontal: 12,
-              }}
-              activeOpacity={0.8}
-            >
-              <Ionicons
-                name={timerRunning ? "pause" : "play"}
-                size={13}
-                color="#fff"
-              />
               <Text
                 style={{
-                  color: "#fff",
+                  fontSize: 40,
                   fontWeight: "700",
-                  fontSize: 15,
                   fontVariant: ["tabular-nums"],
+                  color: timerSeconds === 0 ? "#4ade80" : "#fff",
                 }}
               >
-                {timerSeconds !== null
-                  ? formatTime(timerSeconds)
-                  : formatTime(effectiveDuration!)}
+                {timerSeconds === 0
+                  ? "Done"
+                  : formatTime(timerSeconds ?? effectiveDuration!)}
               </Text>
-            </TouchableOpacity>
-          )}
-        </View>
+              <Ionicons
+                name={
+                  timerSeconds === 0
+                    ? "checkmark-circle"
+                    : timerRunning
+                    ? "pause"
+                    : "play"
+                }
+                size={28}
+                color={timerSeconds === 0 ? "#4ade80" : "#aaa"}
+              />
+            </View>
+            {!timerRunning && timerSeconds !== 0 && (
+              <Text style={{ color: "#555", fontSize: 12, marginTop: 8 }}>
+                Tap to start
+              </Text>
+            )}
+          </TouchableOpacity>
+        )}
 
-        {/* Step counter */}
-        <Text
-          style={{
-            color: "#555",
-            fontSize: 12,
-            textAlign: "center",
-            marginBottom: 10,
-            fontWeight: "500",
-          }}
-        >
-          Step {activeStep + 1} of {steps.length}
-        </Text>
-
-        {/* Swipeable step list — snapToOffsets handles variable card heights */}
+        {/* Gesture-driven step list — PanResponder classifies small/big swipe */}
+        <View style={{ flex: 1 }} {...panResponder.panHandlers}>
         <FlatList
+          ref={flatListRef}
           data={steps}
           keyExtractor={(_, i) => String(i)}
-          snapToOffsets={snapOffsets}
-          decelerationRate="fast"
-          disableIntervalMomentum
-          onMomentumScrollEnd={onMomentumScrollEnd}
-          onLayout={(e) => setListHeight(e.nativeEvent.layout.height)}
-          ListFooterComponent={
-            <View
-              style={{
-                height: Math.max(
-                  0,
-                  listHeight - itemHeights.current[steps.length - 1]
-                ),
-              }}
-            />
-          }
+          scrollEnabled={false}
           contentContainerStyle={{ paddingHorizontal: 16 }}
           showsVerticalScrollIndicator={false}
           renderItem={({ item, index }) => {
@@ -409,17 +414,14 @@ function InstructionModal({
                 onLayout={(e) =>
                   handleItemLayout(index, e.nativeEvent.layout.height)
                 }
-                onPress={() => handleStepSelect(index)}
+                onPress={() => scrollToStepRef.current(index)}
                 activeOpacity={0.9}
                 style={{
                   minHeight: 80,
                   marginBottom: 8,
-                  opacity: isActive ? 1 : 0.4,
-                  backgroundColor: isActive ? "#2d2d2d" : "#1c1c1c",
+                  backgroundColor: isActive ? "#fff" : "#1a1a1a",
                   borderRadius: 14,
                   padding: 14,
-                  borderWidth: 1.5,
-                  borderColor: isActive ? "#fff" : "transparent",
                   flexDirection: "row",
                   alignItems: "flex-start",
                   gap: 12,
@@ -431,7 +433,7 @@ function InstructionModal({
                     width: 24,
                     height: 24,
                     borderRadius: 12,
-                    backgroundColor: isActive ? "#fff" : "#333",
+                    backgroundColor: isActive ? "#111" : "#333",
                     alignItems: "center",
                     justifyContent: "center",
                     flexShrink: 0,
@@ -440,7 +442,7 @@ function InstructionModal({
                 >
                   <Text
                     style={{
-                      color: isActive ? "#000" : "#666",
+                      color: isActive ? "#fff" : "#555",
                       fontSize: 11,
                       fontWeight: "700",
                     }}
@@ -451,7 +453,7 @@ function InstructionModal({
                 <Text
                   style={{
                     flex: 1,
-                    color: isActive ? "#fff" : "#999",
+                    color: isActive ? "#111" : "#555",
                     fontSize: 14,
                     lineHeight: 21,
                   }}
@@ -469,70 +471,10 @@ function InstructionModal({
             );
           }}
         />
-
-        {/* Bottom chips */}
-        <View
-          style={{
-            flexDirection: "row",
-            paddingHorizontal: 16,
-            paddingTop: 12,
-            paddingBottom: Platform.OS === "ios" ? 28 : 16,
-            gap: 10,
-            borderTopWidth: 0.5,
-            borderTopColor: "#2a2a2a",
-          }}
-        >
-          {[
-            { icon: "help-circle-outline" as const, label: "Help" },
-            { icon: "restaurant-outline" as const, label: "Bite" },
-          ].map((chip) => (
-            <TouchableOpacity
-              key={chip.label}
-              style={{
-                flex: 1,
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 6,
-                backgroundColor: "#1f1f1f",
-                borderRadius: 999,
-                paddingVertical: 13,
-              }}
-              activeOpacity={0.75}
-            >
-              <Ionicons name={chip.icon} size={15} color="#666" />
-              <Text style={{ color: "#666", fontSize: 14, fontWeight: "600" }}>
-                {chip.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-          <TouchableOpacity
-            onPress={() => setShowIngSheet(true)}
-            style={{
-              flex: 1,
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              backgroundColor: "#1f1f1f",
-              borderRadius: 999,
-              paddingVertical: 13,
-            }}
-            activeOpacity={0.75}
-          >
-            <Ionicons name="list-outline" size={15} color="#aaa" />
-            <Text style={{ color: "#aaa", fontSize: 14, fontWeight: "600" }}>
-              Ingredients
-            </Text>
-          </TouchableOpacity>
         </View>
+
       </SafeAreaView>
 
-      <IngredientsSheet
-        visible={showIngSheet}
-        onClose={() => setShowIngSheet(false)}
-        ingredients={ingredients}
-      />
     </Modal>
   );
 }
@@ -544,10 +486,54 @@ export default function RecipeDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [saved, setSaved] = useState(false);
-  const [showIngredients, setShowIngredients] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
+  const [recipe, setRecipe] = useState<Recipe | undefined>(
+    RECIPES.find((r) => r.id === id)
+  );
 
-  const recipe: Recipe | undefined = RECIPES.find((r) => r.id === id);
+  // Fall back to AsyncStorage for user-created recipes
+  useEffect(() => {
+    if (!recipe) {
+      getUserRecipes().then((list) =>
+        setRecipe(list.find((r) => r.id === id))
+      );
+    }
+  }, [id]);
+
+  const handleDelete = () => {
+    Alert.alert("Delete Recipe", "This can't be undone.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          await deleteUserRecipe(id!);
+          router.back();
+        },
+      },
+    ]);
+  };
+
+  const handleEdit = () => {
+    if (!recipe) return;
+    router.push({
+      pathname: "/create-recipe",
+      params: {
+        recipeId: recipe.id,
+        prefillTitle: recipe.title,
+        prefillDescription: recipe.description,
+        prefillIngredients: JSON.stringify(recipe.ingredients),
+        prefillSteps: JSON.stringify(recipe.steps.map((s) => s.text)),
+        prefillImage: recipe.imageUrl,
+        prefillCategory: recipe.category,
+        prefillDifficulty: recipe.difficulty ?? "",
+        prefillCookTime: recipe.cookTime,
+        prefillServings: String(recipe.servings),
+        prefillFlavors: JSON.stringify(recipe.primaryFlavors ?? []),
+        prefillAuthor: recipe.username,
+      },
+    });
+  };
 
   if (!recipe) {
     return (
@@ -598,24 +584,57 @@ export default function RecipeDetailScreen() {
           >
             {recipe.title}
           </Text>
-          <TouchableOpacity
-            onPress={() => setSaved((s) => !s)}
-            style={{
-              width: 38,
-              height: 38,
-              borderRadius: 19,
-              backgroundColor: "#f3f4f6",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-            activeOpacity={0.7}
-          >
-            <Ionicons
-              name={saved ? "bookmark" : "bookmark-outline"}
-              size={20}
-              color="#000"
-            />
-          </TouchableOpacity>
+          {recipe.isUserCreated ? (
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <TouchableOpacity
+                onPress={handleEdit}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 19,
+                  backgroundColor: "#f3f4f6",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="pencil-outline" size={18} color="#000" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleDelete}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: 19,
+                  backgroundColor: "#fee2e2",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="trash-outline" size={18} color="#ef4444" />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity
+              onPress={() => setSaved((s) => !s)}
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 19,
+                backgroundColor: "#f3f4f6",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name={saved ? "bookmark" : "bookmark-outline"}
+                size={20}
+                color="#000"
+              />
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Scrollable body */}
@@ -664,47 +683,127 @@ export default function RecipeDetailScreen() {
                 flexDirection: "row",
                 alignItems: "center",
                 flexWrap: "wrap",
-                gap: 16,
-                marginBottom: 16,
+                gap: 12,
+                marginBottom: 12,
               }}
             >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                <Ionicons name="star" size={14} color="#F5A623" />
-                <Text style={{ fontSize: 14, fontWeight: "600", color: "#000" }}>
-                  {recipe.rating}
-                </Text>
-                <Text style={{ fontSize: 14, color: "#9ca3af" }}>
-                  ({recipe.ratingCount})
-                </Text>
-              </View>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                <Ionicons name="time-outline" size={14} color="#9ca3af" />
-                <Text style={{ fontSize: 14, color: "#9ca3af" }}>{recipe.cookTime}</Text>
-              </View>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                <Ionicons name="people-outline" size={14} color="#9ca3af" />
-                <Text style={{ fontSize: 14, color: "#9ca3af" }}>
-                  {recipe.servings} servings
-                </Text>
-              </View>
+              {recipe.rating > 0 && (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                  <Ionicons name="star" size={14} color="#F5A623" />
+                  <Text style={{ fontSize: 14, fontWeight: "600", color: "#000" }}>
+                    {recipe.rating}
+                  </Text>
+                  <Text style={{ fontSize: 14, color: "#9ca3af" }}>
+                    ({recipe.ratingCount})
+                  </Text>
+                </View>
+              )}
+              {!!recipe.cookTime && (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                  <Ionicons name="time-outline" size={14} color="#9ca3af" />
+                  <Text style={{ fontSize: 14, color: "#9ca3af" }}>{recipe.cookTime}</Text>
+                </View>
+              )}
+              {recipe.servings > 0 && (
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                  <Ionicons name="people-outline" size={14} color="#9ca3af" />
+                  <Text style={{ fontSize: 14, color: "#9ca3af" }}>
+                    {recipe.servings} {recipe.servings === 1 ? "serving" : "servings"}
+                  </Text>
+                </View>
+              )}
+              {!!recipe.difficulty && (
+                <View
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 3,
+                    borderRadius: 999,
+                    backgroundColor:
+                      recipe.difficulty === "Easy" ? "#dcfce7" :
+                      recipe.difficulty === "Medium" ? "#fef9c3" : "#fee2e2",
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: "600",
+                      color:
+                        recipe.difficulty === "Easy" ? "#16a34a" :
+                        recipe.difficulty === "Medium" ? "#ca8a04" : "#dc2626",
+                    }}
+                  >
+                    {recipe.difficulty}
+                  </Text>
+                </View>
+              )}
             </View>
 
+            {/* Primary Flavors */}
+            {recipe.primaryFlavors && recipe.primaryFlavors.length > 0 && (
+              <Text style={{ fontSize: 13, color: "#9ca3af", marginBottom: 16 }}>
+                {recipe.primaryFlavors.join(" · ")}
+              </Text>
+            )}
+
             {/* Description */}
-            <Text style={{ fontSize: 15, color: "#374151", lineHeight: 24 }}>
-              {recipe.description}
-            </Text>
+            {!!recipe.description && (
+              <Text style={{ fontSize: 15, color: "#374151", lineHeight: 24, marginBottom: 28 }}>
+                {recipe.description}
+              </Text>
+            )}
+
+            {/* Ingredients — inline */}
+            {recipe.ingredients.length > 0 && (
+              <>
+                <Text
+                  style={{
+                    fontSize: 17,
+                    fontWeight: "700",
+                    color: "#000",
+                    marginBottom: 14,
+                  }}
+                >
+                  Ingredients
+                </Text>
+                {recipe.ingredients.map((ing, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "flex-start",
+                      gap: 12,
+                      paddingVertical: 10,
+                      borderBottomWidth: 0.5,
+                      borderBottomColor: "#f3f4f6",
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 3,
+                        backgroundColor: "#9ca3af",
+                        marginTop: 7,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <Text style={{ flex: 1, fontSize: 15, color: "#111", lineHeight: 22 }}>
+                      {ing}
+                    </Text>
+                  </View>
+                ))}
+              </>
+            )}
           </View>
         </ScrollView>
 
-        {/* Fixed bottom bar */}
+        {/* Fixed bottom — single Start Cooking button */}
         <View
           style={{
             position: "absolute",
             bottom: 0,
             left: 0,
             right: 0,
-            flexDirection: "row",
-            gap: 12,
             paddingHorizontal: 16,
             paddingTop: 12,
             paddingBottom: Platform.OS === "ios" ? 34 : 20,
@@ -714,42 +813,25 @@ export default function RecipeDetailScreen() {
           }}
         >
           <TouchableOpacity
-            onPress={() => setShowIngredients(true)}
-            style={{
-              flex: 1,
-              backgroundColor: "#f3f4f6",
-              borderRadius: 999,
-              paddingVertical: 16,
-              alignItems: "center",
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={{ fontSize: 15, fontWeight: "700", color: "#000" }}>
-              Ingredients
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
             onPress={() => setShowInstructions(true)}
             style={{
-              flex: 1,
               backgroundColor: "#000",
-              borderRadius: 999,
+              borderRadius: 16,
               paddingVertical: 16,
+              flexDirection: "row",
               alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
             }}
-            activeOpacity={0.8}
+            activeOpacity={0.85}
           >
-            <Text style={{ fontSize: 15, fontWeight: "700", color: "#fff" }}>
-              Instructions
+            <Ionicons name="play-circle-outline" size={20} color="#fff" />
+            <Text style={{ fontSize: 16, fontWeight: "700", color: "#fff" }}>
+              Start Cooking
             </Text>
           </TouchableOpacity>
         </View>
 
-        <IngredientsSheet
-          visible={showIngredients}
-          onClose={() => setShowIngredients(false)}
-          ingredients={recipe.ingredients}
-        />
         <InstructionModal
           visible={showInstructions}
           onClose={() => setShowInstructions(false)}

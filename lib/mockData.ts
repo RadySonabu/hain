@@ -22,6 +22,10 @@ export type Recipe = {
   description: string;
   ingredients: string[];
   steps: RecipeStep[];
+  isUserCreated?: boolean;
+  isPublic?: boolean;
+  difficulty?: "Easy" | "Medium" | "Hard";
+  primaryFlavors?: string[];
 };
 
 export const RECIPES: Recipe[] = [
