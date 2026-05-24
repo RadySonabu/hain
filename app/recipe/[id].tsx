@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Dimensions,
   FlatList,
   Modal,
   PanResponder,
@@ -11,6 +12,7 @@ import {
   View,
 } from "react-native";
 import { Image } from "expo-image";
+import { Video, ResizeMode } from "expo-av";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -123,7 +125,7 @@ function InstructionModal({
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const [listHeight, setListHeight] = useState(300);
-  const [pipDismissed, setPipDismissed] = useState(false);
+  const [pipExpanded, setPipExpanded] = useState(false);
   // LLM-detected durations keyed by step index (null = no time found)
   const [detectedDurations, setDetectedDurations] = useState<Map<number, number | null>>(new Map());
   const [detecting, setDetecting] = useState(false);
@@ -180,9 +182,9 @@ function InstructionModal({
     };
   }, [timerRunning]);
 
-  // Reset PiP whenever the active step changes so it re-appears on new steps with media
+  // Collapse PiP whenever the active step changes
   useEffect(() => {
-    setPipDismissed(false);
+    setPipExpanded(false);
   }, [activeStep]);
 
   const handleStepSelect = useCallback(
@@ -480,62 +482,124 @@ function InstructionModal({
         </View>
 
         {/* PiP — floating media preview for the active step */}
-        {!!(currentStep?.imageUrl || currentStep?.videoUrl) && !pipDismissed && (
-          <TouchableOpacity
-            onPress={() => setPipDismissed(true)}
-            activeOpacity={0.9}
-            style={{
-              position: "absolute",
-              bottom: 16 + insets.bottom,
-              right: 16,
-              width: 124,
-              height: 80,
-              borderRadius: 12,
-              overflow: "hidden",
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 4 },
-              shadowOpacity: 0.5,
-              shadowRadius: 10,
-              elevation: 10,
-            }}
-          >
-            {currentStep?.imageUrl ? (
+        {!!(currentStep?.imageUrl || currentStep?.videoUrl) && (() => {
+          const screenW = Dimensions.get("window").width;
+          const expandedW = screenW - 32;
+          const expandedH = Math.round(expandedW * 9 / 16);
+
+          const mediaContent = (expanded: boolean) =>
+            currentStep?.videoUrl ? (
+              <Video
+                source={{ uri: currentStep.videoUrl }}
+                style={{ width: "100%", height: "100%" }}
+                resizeMode={ResizeMode.COVER}
+                shouldPlay
+                isLooping
+                isMuted={!expanded}
+              />
+            ) : (
               <Image
-                source={{ uri: currentStep.imageUrl }}
+                source={{ uri: currentStep!.imageUrl }}
                 style={{ width: "100%", height: "100%" }}
                 contentFit="cover"
               />
-            ) : (
-              <View
-                style={{
-                  flex: 1,
-                  backgroundColor: "#222",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <Ionicons name="play-circle-outline" size={30} color="#fff" />
-                <Text style={{ fontSize: 10, color: "#aaa", marginTop: 4 }}>Video</Text>
-              </View>
-            )}
-            {/* Close badge */}
-            <View
+            );
+
+          if (pipExpanded) {
+            return (
+              <>
+                {/* Backdrop — tap outside to collapse back to small */}
+                <TouchableOpacity
+                  activeOpacity={1}
+                  onPress={() => setPipExpanded(false)}
+                  style={{
+                    position: "absolute",
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: "rgba(0,0,0,0.72)",
+                  }}
+                />
+                {/* Expanded media box */}
+                <View
+                  style={{
+                    position: "absolute",
+                    bottom: 24 + insets.bottom,
+                    left: 16,
+                    right: 16,
+                    height: expandedH,
+                    borderRadius: 18,
+                    overflow: "hidden",
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 8 },
+                    shadowOpacity: 0.6,
+                    shadowRadius: 16,
+                    elevation: 16,
+                  }}
+                >
+                  {mediaContent(true)}
+                  {/* Minimize hint */}
+                  <View
+                    style={{
+                      position: "absolute",
+                      bottom: 10,
+                      left: 0,
+                      right: 0,
+                      alignItems: "center",
+                    }}
+                  >
+                    <View
+                      style={{
+                        backgroundColor: "rgba(0,0,0,0.5)",
+                        borderRadius: 999,
+                        paddingHorizontal: 10,
+                        paddingVertical: 4,
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
+                        Tap outside to minimize
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              </>
+            );
+          }
+
+          // Small PiP — tap to expand
+          return (
+            <TouchableOpacity
+              onPress={() => setPipExpanded(true)}
+              activeOpacity={0.9}
               style={{
                 position: "absolute",
-                top: 5,
-                right: 5,
-                width: 18,
-                height: 18,
-                borderRadius: 9,
-                backgroundColor: "rgba(0,0,0,0.65)",
-                alignItems: "center",
-                justifyContent: "center",
+                bottom: 20 + insets.bottom,
+                right: 16,
+                width: 180,
+                height: 116,
+                borderRadius: 14,
+                overflow: "hidden",
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 6 },
+                shadowOpacity: 0.55,
+                shadowRadius: 12,
+                elevation: 12,
               }}
             >
-              <Ionicons name="close" size={11} color="#fff" />
-            </View>
-          </TouchableOpacity>
-        )}
+              {mediaContent(false)}
+              {/* Expand hint */}
+              <View
+                style={{
+                  position: "absolute",
+                  bottom: 6,
+                  left: 0,
+                  right: 0,
+                  alignItems: "center",
+                }}
+              >
+                <Ionicons name="expand-outline" size={14} color="rgba(255,255,255,0.6)" />
+              </View>
+            </TouchableOpacity>
+          );
+        })()}
 
       </SafeAreaView>
 
