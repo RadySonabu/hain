@@ -1,6 +1,7 @@
 export type RecipeStep = {
   text: string;
   imageUrl?: string;
+  videoUrl?: string;
   duration?: number; // seconds
 };
 

@@ -13,6 +13,7 @@ import { Stack, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useRecipeParse } from "@/src/hooks/useRecipeParse";
 import { saveUserRecipe } from "@/lib/recipeStore";
+import { useModelStatus } from "@/src/context/ModelContext";
 
 const LABEL_STYLE = {
   fontSize: 11,
@@ -25,6 +26,7 @@ const LABEL_STYLE = {
 
 export default function DescribeRecipeScreen() {
   const router = useRouter();
+  const { modelReady } = useModelStatus();
   const [text, setText] = useState("");
   const { isLoading, result, error, usedFallback, parse, reset } =
     useRecipeParse();
@@ -78,6 +80,79 @@ export default function DescribeRecipeScreen() {
     });
     router.back();
   };
+
+  // ── Model not ready — show disabled state ─────────────────────────────────
+  if (!modelReady) {
+    return (
+      <>
+        <Stack.Screen options={{ headerTitle: "Describe Recipe" }} />
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: "#fff",
+            paddingHorizontal: 28,
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <View
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 22,
+              backgroundColor: "#f3f4f6",
+              alignItems: "center",
+              justifyContent: "center",
+              marginBottom: 20,
+            }}
+          >
+            <Ionicons name="hardware-chip-outline" size={36} color="#d1d5db" />
+          </View>
+          <Text
+            style={{
+              fontSize: 20,
+              fontWeight: "800",
+              color: "#111827",
+              textAlign: "center",
+              marginBottom: 10,
+            }}
+          >
+            AI model not downloaded
+          </Text>
+          <Text
+            style={{
+              fontSize: 14,
+              color: "#6b7280",
+              textAlign: "center",
+              lineHeight: 21,
+              marginBottom: 28,
+            }}
+          >
+            Download the SmolLM2 model in Settings to analyse recipes
+            on-device — private and offline.
+          </Text>
+          <TouchableOpacity
+            onPress={() => router.push("/(tabs)/profile")}
+            style={{
+              backgroundColor: "#111827",
+              borderRadius: 14,
+              paddingVertical: 15,
+              paddingHorizontal: 32,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 8,
+            }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="cloud-download-outline" size={16} color="#fff" />
+            <Text style={{ fontSize: 15, fontWeight: "700", color: "#fff" }}>
+              Go to Settings
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </>
+    );
+  }
 
   return (
     <>

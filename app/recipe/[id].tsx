@@ -123,6 +123,7 @@ function InstructionModal({
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const [listHeight, setListHeight] = useState(300);
+  const [pipDismissed, setPipDismissed] = useState(false);
   // LLM-detected durations keyed by step index (null = no time found)
   const [detectedDurations, setDetectedDurations] = useState<Map<number, number | null>>(new Map());
   const [detecting, setDetecting] = useState(false);
@@ -178,6 +179,11 @@ function InstructionModal({
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [timerRunning]);
+
+  // Reset PiP whenever the active step changes so it re-appears on new steps with media
+  useEffect(() => {
+    setPipDismissed(false);
+  }, [activeStep]);
 
   const handleStepSelect = useCallback(
     (index: number) => {
@@ -472,6 +478,64 @@ function InstructionModal({
           }}
         />
         </View>
+
+        {/* PiP — floating media preview for the active step */}
+        {!!(currentStep?.imageUrl || currentStep?.videoUrl) && !pipDismissed && (
+          <TouchableOpacity
+            onPress={() => setPipDismissed(true)}
+            activeOpacity={0.9}
+            style={{
+              position: "absolute",
+              bottom: 16 + insets.bottom,
+              right: 16,
+              width: 124,
+              height: 80,
+              borderRadius: 12,
+              overflow: "hidden",
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.5,
+              shadowRadius: 10,
+              elevation: 10,
+            }}
+          >
+            {currentStep?.imageUrl ? (
+              <Image
+                source={{ uri: currentStep.imageUrl }}
+                style={{ width: "100%", height: "100%" }}
+                contentFit="cover"
+              />
+            ) : (
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: "#222",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Ionicons name="play-circle-outline" size={30} color="#fff" />
+                <Text style={{ fontSize: 10, color: "#aaa", marginTop: 4 }}>Video</Text>
+              </View>
+            )}
+            {/* Close badge */}
+            <View
+              style={{
+                position: "absolute",
+                top: 5,
+                right: 5,
+                width: 18,
+                height: 18,
+                borderRadius: 9,
+                backgroundColor: "rgba(0,0,0,0.65)",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Ionicons name="close" size={11} color="#fff" />
+            </View>
+          </TouchableOpacity>
+        )}
 
       </SafeAreaView>
 

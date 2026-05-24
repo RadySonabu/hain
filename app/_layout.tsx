@@ -28,7 +28,8 @@ export default function RootLayout() {
         <Stack>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="recipe/[id]" options={{ headerShown: false }} />
-          <Stack.Screen name="create-recipe" options={{ headerBackTitle: "Cook" }} />
+          <Stack.Screen name="add-recipe" options={{ headerTitle: "Add Recipe", headerBackTitle: "Back" }} />
+          <Stack.Screen name="create-recipe" options={{ headerBackTitle: "Add Recipe" }} />
           <Stack.Screen name="create-recipe-url" options={{ headerTitle: "Import from URL", headerBackTitle: "Back" }} />
           <Stack.Screen name="create-recipe-social" options={{ headerTitle: "Social / Screenshot", headerBackTitle: "Back" }} />
           <Stack.Screen name="describe-recipe" options={{ headerTitle: "Describe Recipe", headerBackTitle: "Back" }} />

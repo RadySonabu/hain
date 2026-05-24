@@ -2,7 +2,6 @@ import React, { useCallback, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
-  Modal,
   ScrollView,
   Text,
   TextInput,
@@ -18,54 +17,7 @@ import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
 
 const CATEGORIES = ["All", "Breakfast", "Pasta", "Vegan", "Quick", "Dessert"];
 
-function OptionCard({
-  icon,
-  title,
-  subtitle,
-  onPress,
-}: {
-  icon: React.ComponentProps<typeof Ionicons>["name"];
-  title: string;
-  subtitle: string;
-  onPress: () => void;
-}) {
-  return (
-    <TouchableOpacity
-      onPress={onPress}
-      activeOpacity={0.75}
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 14,
-        paddingVertical: 14,
-        borderBottomWidth: 0.5,
-        borderBottomColor: "#f3f4f6",
-      }}
-    >
-      <View
-        style={{
-          width: 48,
-          height: 48,
-          borderRadius: 12,
-          backgroundColor: "#f3f4f6",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <Ionicons name={icon} size={24} color="#374151" />
-      </View>
-      <View style={{ flex: 1 }}>
-        <Text style={{ fontSize: 16, fontWeight: "600", color: "#000", marginBottom: 2 }}>
-          {title}
-        </Text>
-        <Text style={{ fontSize: 13, color: "#9ca3af" }}>{subtitle}</Text>
-      </View>
-      <Ionicons name="chevron-forward" size={18} color="#d1d5db" />
-    </TouchableOpacity>
-  );
-}
-
-function RecipeCard({
+function RecipeListRow({
   recipe,
   onPress,
   onLongPress,
@@ -76,50 +28,112 @@ function RecipeCard({
 }) {
   return (
     <TouchableOpacity
-      className="flex-1 mb-4"
       onPress={onPress}
       onLongPress={onLongPress}
-      activeOpacity={0.88}
+      activeOpacity={0.82}
       delayLongPress={400}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 14,
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        backgroundColor: "#fff",
+        borderBottomWidth: 0.5,
+        borderBottomColor: "#f3f4f6",
+      }}
     >
-      <View style={{ position: "relative" }}>
+      {/* Thumbnail */}
+      <View
+        style={{
+          borderRadius: 10,
+          overflow: "hidden",
+          flexShrink: 0,
+          position: "relative",
+        }}
+      >
         <Image
           source={{ uri: recipe.imageUrl }}
-          style={{ width: "100%", aspectRatio: 1, borderRadius: 12 }}
+          style={{ width: 72, height: 72 }}
           contentFit="cover"
         />
         {recipe.isUserCreated && !recipe.isPublic && (
           <View
             style={{
               position: "absolute",
-              top: 8,
-              right: 8,
+              top: 4,
+              right: 4,
               backgroundColor: "rgba(0,0,0,0.55)",
               borderRadius: 999,
-              padding: 4,
+              padding: 3,
             }}
           >
-            <Ionicons name="lock-closed" size={12} color="#fff" />
+            <Ionicons name="lock-closed" size={10} color="#fff" />
           </View>
         )}
       </View>
-      <Text className="font-bold text-black text-sm mt-2" numberOfLines={1}>
-        {recipe.title}
-      </Text>
-      <View className="flex-row items-center gap-3 mt-1">
-        {recipe.cookTime ? (
-          <View className="flex-row items-center gap-1">
-            <Ionicons name="time-outline" size={12} color="#9ca3af" />
-            <Text className="text-xs text-gray-400">{recipe.cookTime}</Text>
-          </View>
-        ) : null}
-        {recipe.rating > 0 ? (
-          <View className="flex-row items-center gap-1">
-            <Ionicons name="star" size={12} color="#F5A623" />
-            <Text className="text-xs text-gray-400">{recipe.rating}</Text>
-          </View>
-        ) : null}
+
+      {/* Title + meta */}
+      <View style={{ flex: 1, gap: 5 }}>
+        <Text
+          style={{ fontSize: 15, fontWeight: "700", color: "#000", lineHeight: 20 }}
+          numberOfLines={2}
+        >
+          {recipe.title}
+        </Text>
+
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 6,
+          }}
+        >
+          {recipe.cookTime ? (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+              <Ionicons name="time-outline" size={12} color="#9ca3af" />
+              <Text style={{ fontSize: 12, color: "#9ca3af" }}>
+                {recipe.cookTime}
+              </Text>
+            </View>
+          ) : null}
+
+          {recipe.category ? (
+            <View
+              style={{
+                backgroundColor: "#f3f4f6",
+                borderRadius: 999,
+                paddingHorizontal: 8,
+                paddingVertical: 2,
+              }}
+            >
+              <Text
+                style={{ fontSize: 11, color: "#374151", fontWeight: "500" }}
+              >
+                {recipe.category}
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </View>
+
+      {/* Rating */}
+      {recipe.rating > 0 ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 3,
+            flexShrink: 0,
+          }}
+        >
+          <Ionicons name="star" size={13} color="#F5A623" />
+          <Text style={{ fontSize: 13, fontWeight: "600", color: "#374151" }}>
+            {recipe.rating}
+          </Text>
+        </View>
+      ) : null}
     </TouchableOpacity>
   );
 }
@@ -128,7 +142,6 @@ export default function CookScreen() {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
-  const [showSheet, setShowSheet] = useState(false);
   const [userRecipes, setUserRecipes] = useState<Recipe[]>([]);
 
   useFocusEffect(
@@ -190,7 +203,9 @@ export default function CookScreen() {
               style: "destructive",
               onPress: async () => {
                 await deleteUserRecipe(recipe.id);
-                setUserRecipes((prev) => prev.filter((r) => r.id !== recipe.id));
+                setUserRecipes((prev) =>
+                  prev.filter((r) => r.id !== recipe.id)
+                );
               },
             },
           ]);
@@ -201,16 +216,32 @@ export default function CookScreen() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-white" edges={["top"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }} edges={["top"]}>
       {/* Header */}
       <View
-        className="flex-row items-center justify-between px-4 py-2"
-        style={{ borderBottomWidth: 0.5, borderBottomColor: "#dbdbdb" }}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          paddingHorizontal: 16,
+          paddingVertical: 8,
+          borderBottomWidth: 0.5,
+          borderBottomColor: "#dbdbdb",
+        }}
       >
-        <Text className="text-2xl font-bold text-black">Cook</Text>
+        <Text style={{ fontSize: 24, fontWeight: "800", color: "#000" }}>
+          Cook
+        </Text>
         <TouchableOpacity
-          onPress={() => setShowSheet(true)}
-          className="w-9 h-9 bg-black rounded-full items-center justify-center"
+          onPress={() => router.push("/add-recipe")}
+          style={{
+            width: 36,
+            height: 36,
+            backgroundColor: "#000",
+            borderRadius: 999,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
           activeOpacity={0.8}
         >
           <Ionicons name="add" size={22} color="#fff" />
@@ -218,11 +249,20 @@ export default function CookScreen() {
       </View>
 
       {/* Search bar */}
-      <View className="px-4 pt-3 pb-1">
-        <View className="flex-row items-center bg-gray-100 rounded-xl px-3 gap-2">
+      <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            backgroundColor: "#f3f4f6",
+            borderRadius: 12,
+            paddingHorizontal: 12,
+            gap: 8,
+          }}
+        >
           <Ionicons name="search-outline" size={18} color="#9ca3af" />
           <TextInput
-            className="flex-1 py-3 text-sm text-black"
+            style={{ flex: 1, paddingVertical: 11, fontSize: 14, color: "#000" }}
             placeholder="Search recipes..."
             placeholderTextColor="#9ca3af"
             value={query}
@@ -242,7 +282,11 @@ export default function CookScreen() {
         horizontal
         showsHorizontalScrollIndicator={false}
         style={{ flexGrow: 0 }}
-        contentContainerStyle={{ paddingHorizontal: 16, gap: 8, paddingVertical: 10 }}
+        contentContainerStyle={{
+          paddingHorizontal: 16,
+          gap: 8,
+          paddingVertical: 10,
+        }}
       >
         {CATEGORIES.map((cat) => (
           <TouchableOpacity
@@ -250,7 +294,7 @@ export default function CookScreen() {
             onPress={() => setSelectedCategory(cat)}
             style={{
               paddingHorizontal: 16,
-              paddingVertical: 8,
+              paddingVertical: 7,
               borderRadius: 999,
               backgroundColor: selectedCategory === cat ? "#000" : "#f3f4f6",
             }}
@@ -269,82 +313,33 @@ export default function CookScreen() {
         ))}
       </ScrollView>
 
-      {/* Recipe grid */}
+      {/* Recipe list */}
       <View style={{ flex: 1 }}>
         {filtered.length === 0 ? (
-          <View className="flex-1 items-center justify-center">
+          <View
+            style={{ flex: 1, alignItems: "center", justifyContent: "center" }}
+          >
             <Ionicons name="search-outline" size={48} color="#d1d5db" />
-            <Text className="text-gray-400 mt-3 text-base">No recipes found</Text>
+            <Text style={{ color: "#9ca3af", marginTop: 12, fontSize: 15 }}>
+              No recipes found
+            </Text>
           </View>
         ) : (
           <FlatList
             data={filtered}
             keyExtractor={(item) => item.id}
-            numColumns={2}
-            columnWrapperStyle={{ gap: 12, paddingHorizontal: 16 }}
-            contentContainerStyle={{ paddingTop: 4, paddingBottom: 24 }}
             renderItem={({ item }) => (
-            <RecipeCard
-              recipe={item}
-              onPress={() => router.push(`/recipe/${item.id}`)}
-              onLongPress={() => handleLongPress(item)}
-            />
-          )}
+              <RecipeListRow
+                recipe={item}
+                onPress={() => router.push(`/recipe/${item.id}`)}
+                onLongPress={() => handleLongPress(item)}
+              />
+            )}
             showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingBottom: 24 }}
           />
         )}
       </View>
-      {/* Add Recipe bottom sheet */}
-      <Modal
-        visible={showSheet}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowSheet(false)}
-      >
-        <TouchableOpacity
-          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.4)" }}
-          activeOpacity={1}
-          onPress={() => setShowSheet(false)}
-        />
-        <View
-          style={{
-            backgroundColor: "#fff",
-            borderTopLeftRadius: 20,
-            borderTopRightRadius: 20,
-            paddingHorizontal: 24,
-            paddingTop: 24,
-            paddingBottom: 48,
-          }}
-        >
-          <Text style={{ fontSize: 18, fontWeight: "700", color: "#000", marginBottom: 8 }}>
-            Add a Recipe
-          </Text>
-          <OptionCard
-            icon="create-outline"
-            title="Manual"
-            subtitle="Fill in the details yourself"
-            onPress={() => { setShowSheet(false); router.push("/create-recipe"); }}
-          />
-          <OptionCard
-            icon="link-outline"
-            title="From URL"
-            subtitle="Import from any recipe website"
-            onPress={() => { setShowSheet(false); router.push("/create-recipe-url"); }}
-          />
-          <OptionCard
-            icon="phone-portrait-outline"
-            title="Social / Screenshot"
-            subtitle="From Instagram, TikTok, or a photo"
-            onPress={() => { setShowSheet(false); router.push("/create-recipe-social"); }}
-          />
-          <OptionCard
-            icon="sparkles-outline"
-            title="Describe with text"
-            subtitle="Type a recipe — Apple Intelligence fills the form"
-            onPress={() => { setShowSheet(false); router.push("/describe-recipe"); }}
-          />
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }

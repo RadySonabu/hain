@@ -41,6 +41,7 @@ export interface IngredientField {
 export interface StepField {
   value: string;
   duration: number | null;
+  media?: { uri: string; type: "image" | "video" } | null;
 }
 
 export interface RecipeFormValues {

@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { createRef, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  Animated,
-  KeyboardAvoidingView,
-  Platform,
+  LayoutChangeEvent,
   ScrollView,
   Switch,
   Text,
@@ -16,9 +14,15 @@ import { Image } from "expo-image";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import * as Haptics from "expo-haptics";
+import Reanimated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 import { saveUserRecipe, updateUserRecipe } from "@/lib/recipeStore";
-import SmartTextInput from "@/components/SmartTextInput";
-import { useRecipeParse } from "@/src/hooks/useRecipeParse";
+import SmartTextInput, { type SmartTextInputHandle } from "@/components/SmartTextInput";
 import type { RecipeFormValues } from "@/src/types/recipe";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,30 +48,28 @@ const LABEL_STYLE = {
   marginBottom: 10,
 };
 
-// ── Shimmer placeholder ───────────────────────────────────────────────────────
-function ShimmerBar({
-  anim,
-  height = 40,
-  style,
-}: {
-  anim: Animated.Value;
-  height?: number;
-  style?: object;
-}) {
-  return (
-    <Animated.View
-      style={[
-        {
-          height,
-          backgroundColor: "#e5e7eb",
-          borderRadius: 8,
-          opacity: anim,
-        },
-        style,
-      ]}
-    />
-  );
-}
+const COOKING_TIPS = [
+  "Be specific with measurements — \"2 cloves garlic, minced\" beats \"some garlic\" every time.",
+  "Prep everything before you start cooking. It makes the whole process smoother.",
+  "Taste as you go and adjust seasoning in small amounts.",
+  "Let meat rest after cooking to redistribute the juices — 5 minutes makes a real difference.",
+  "Room-temperature eggs and butter blend together much better in baked goods.",
+  "A splash of the pasta cooking water helps sauce cling beautifully to noodles.",
+  "Dry your proteins before searing — moisture is the enemy of a good crust.",
+];
+
+const CATEGORY_IMAGES: Record<string, string> = {
+  Breakfast: "https://picsum.photos/seed/breakfast-food/600/400",
+  Lunch:     "https://picsum.photos/seed/lunch-food/600/400",
+  Dinner:    "https://picsum.photos/seed/dinner-food/600/400",
+  Pasta:     "https://picsum.photos/seed/pasta-food/600/400",
+  Vegan:     "https://picsum.photos/seed/vegan-food/600/400",
+  Quick:     "https://picsum.photos/seed/quick-meal/600/400",
+  Dessert:   "https://picsum.photos/seed/dessert-food/600/400",
+  BBQ:       "https://picsum.photos/seed/bbq-food/600/400",
+  Snack:     "https://picsum.photos/seed/snack-food/600/400",
+};
+const DEFAULT_IMAGE = "https://picsum.photos/seed/recipe-default/600/400";
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CreateRecipeScreen() {
@@ -102,13 +104,35 @@ export default function CreateRecipeScreen() {
 
   const isEditing = !!recipeId;
 
-  // ── react-hook-form ─────────────────────────────────────────────────────────
-  const {
-    control,
-    setValue,
-    handleSubmit,
-    watch,
-  } = useForm<RecipeFormValues>({
+  // ── Keyboard & layout ────────────────────────────────────────────────────
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  const scrollToRef = (viewRef: RefObject<View | null>) => {
+    if (!viewRef.current || !scrollViewRef.current) return;
+    viewRef.current.measureLayout(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      scrollViewRef.current as any,
+      (_x: number, y: number) => {
+        scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
+      },
+      () => {}
+    );
+  };
+
+  // Per-row View refs (used for scroll-into-view)
+  const ingredientRowRefs = useRef<RefObject<View | null>[]>([]);
+  const stepRowRefs = useRef<RefObject<View | null>[]>([]);
+
+  // Per-row input refs (used for programmatic focus)
+  const ingredientInputRefs = useRef<RefObject<SmartTextInputHandle | null>[]>([]);
+  const stepInputRefs = useRef<RefObject<SmartTextInputHandle | null>[]>([]);
+
+  // Pending focus index — set before appending; consumed after render
+  const pendingIngredientFocusRef = useRef<number | null>(null);
+  const pendingStepFocusRef = useRef<number | null>(null);
+
+  // ── react-hook-form ──────────────────────────────────────────────────────
+  const { control, setValue, handleSubmit, watch } = useForm<RecipeFormValues>({
     defaultValues: {
       title: prefillTitle ?? "",
       authorName: prefillAuthor ?? "You",
@@ -128,8 +152,9 @@ export default function CreateRecipeScreen() {
         ? (JSON.parse(prefillSteps) as string[]).map((v) => ({
             value: v,
             duration: null,
+            media: null,
           }))
-        : [{ value: "", duration: null }],
+        : [{ value: "", duration: null, media: null }],
     },
   });
 
@@ -137,60 +162,97 @@ export default function CreateRecipeScreen() {
     fields: ingredientFields,
     append: appendIngredient,
     remove: removeIngredient,
-    replace: replaceIngredients,
   } = useFieldArray({ control, name: "ingredients" });
 
   const {
     fields: stepFields,
     append: appendStep,
     remove: removeStep,
-    replace: replaceSteps,
   } = useFieldArray({ control, name: "steps" });
 
-  // ── Watch for the controlled values we need inline ───────────────────────
+  // ── Watched values ───────────────────────────────────────────────────────
   const category = watch("category");
   const difficulty = watch("difficulty");
+  const cookTime = watch("cookTime");
   const servings = watch("servings");
   const primaryFlavors = watch("primaryFlavors");
   const isPublic = watch("isPublic");
+  const watchedSteps = watch("steps");
 
   // ── Photo (not a form field) ─────────────────────────────────────────────
   const [photo, setPhoto] = useState<string | null>(prefillImage ?? null);
 
-  // ── Recipe paste-and-parse ───────────────────────────────────────────────
-  const [pasteText, setPasteText] = useState("");
-  const { isLoading: isParsing, result: parseResult, error: parseError, usedFallback, parse } =
-    useRecipeParse();
+  // ── Stable random tip for this session ──────────────────────────────────
+  const [tipIndex] = useState(() => Math.floor(Math.random() * COOKING_TIPS.length));
 
-  // Shimmer animation while parsing
-  const shimmerAnim = useRef(new Animated.Value(0.3)).current;
-  const shimmerLoop = useRef<Animated.CompositeAnimation | null>(null);
+  // Focus newly-appended ingredient/step inputs after render
+  useEffect(() => {
+    if (pendingIngredientFocusRef.current !== null) {
+      const idx = pendingIngredientFocusRef.current;
+      pendingIngredientFocusRef.current = null;
+      setTimeout(() => ingredientInputRefs.current[idx]?.current?.focus(), 50);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ingredientFields.length]);
 
   useEffect(() => {
-    if (isParsing) {
-      shimmerAnim.setValue(0.3);
-      shimmerLoop.current = Animated.loop(
-        Animated.sequence([
-          Animated.timing(shimmerAnim, {
-            toValue: 0.8,
-            duration: 700,
-            useNativeDriver: true,
-          }),
-          Animated.timing(shimmerAnim, {
-            toValue: 0.3,
-            duration: 700,
-            useNativeDriver: true,
-          }),
-        ])
-      );
-      shimmerLoop.current.start();
-    } else {
-      shimmerLoop.current?.stop();
-      shimmerAnim.setValue(0);
+    if (pendingStepFocusRef.current !== null) {
+      const idx = pendingStepFocusRef.current;
+      pendingStepFocusRef.current = null;
+      setTimeout(() => stepInputRefs.current[idx]?.current?.focus(), 50);
     }
-  }, [isParsing]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepFields.length]);
 
-  // Toast state
+  // ── "More details" accordion ─────────────────────────────────────────────
+  const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
+  const isDetailsExpandedRef = useRef(false); // stale-closure-safe version
+  const detailsHeight = useSharedValue(0);
+  const detailsMeasuredHeight = useRef(0);
+  const chevronRotation = useSharedValue(0);
+
+  const accordionStyle = useAnimatedStyle(() => ({
+    height: detailsHeight.value,
+    overflow: "hidden" as const,
+  }));
+
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${chevronRotation.value}deg` }],
+  }));
+
+  const onDetailsLayout = (e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height;
+    if (h > 0) {
+      detailsMeasuredHeight.current = h;
+      // If already expanded, keep height in sync (handles font-scale changes)
+      if (isDetailsExpandedRef.current) detailsHeight.value = h;
+    }
+  };
+
+  const toggleDetails = () => {
+    const next = !isDetailsExpanded;
+    setIsDetailsExpanded(next);
+    isDetailsExpandedRef.current = next;
+    detailsHeight.value = withTiming(next ? detailsMeasuredHeight.current : 0, {
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+    });
+    chevronRotation.value = withTiming(next ? 180 : 0, { duration: 250 });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  // Compact summary shown when accordion is collapsed and fields have values
+  const accordionSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (category && category !== "Dinner") parts.push(category);
+    if (cookTime) parts.push(cookTime);
+    if (servings && servings !== 2) parts.push(`${servings} servings`);
+    if (difficulty) parts.push(difficulty);
+    if (photo) parts.push("Photo added");
+    return parts.join(" · ") || null;
+  }, [category, cookTime, servings, difficulty, photo]);
+
+  // ── Toast ────────────────────────────────────────────────────────────────
   const [toast, setToast] = useState<{
     msg: string;
     type: "success" | "error" | "info";
@@ -206,69 +268,6 @@ export default function CreateRecipeScreen() {
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   };
 
-  // When parse succeeds, populate all form fields
-  useEffect(() => {
-    if (!parseResult) return;
-
-    const filledFields: string[] = [];
-
-    if (parseResult.title) {
-      setValue("title", parseResult.title);
-      filledFields.push("title");
-    }
-    if (parseResult.description) {
-      setValue("description", parseResult.description);
-      filledFields.push("description");
-    }
-    if (parseResult.cookTime) {
-      setValue("cookTime", parseResult.cookTime);
-      filledFields.push("cook time");
-    }
-    if (parseResult.servings) {
-      setValue("servings", parseResult.servings);
-      filledFields.push("servings");
-    }
-    if (
-      parseResult.difficulty &&
-      (parseResult.difficulty === "Easy" ||
-        parseResult.difficulty === "Medium" ||
-        parseResult.difficulty === "Hard")
-    ) {
-      setValue("difficulty", parseResult.difficulty);
-      filledFields.push("difficulty");
-    }
-    if (parseResult.category) {
-      setValue("category", parseResult.category);
-    }
-    if (parseResult.ingredients.length > 0) {
-      replaceIngredients(
-        parseResult.ingredients.map((v) => ({ value: v }))
-      );
-      filledFields.push(`${parseResult.ingredients.length} ingredients`);
-    }
-    if (parseResult.steps.length > 0) {
-      replaceSteps(
-        parseResult.steps.map((v) => ({ value: v, duration: null }))
-      );
-      filledFields.push(`${parseResult.steps.length} steps`);
-    }
-
-    const label = filledFields.join(", ");
-    showToast(`Filled ${filledFields.length} fields from your recipe`, "success");
-
-    if (usedFallback) {
-      setTimeout(() => showToast("Parsed via cloud (AI model)", "info"), 3500);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parseResult]);
-
-  // When parse fails, notify
-  useEffect(() => {
-    if (parseError) {
-      showToast("Couldn't parse — please fill in manually", "error");
-    }
-  }, [parseError]);
-
   // ── Image picker ─────────────────────────────────────────────────────────
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -280,6 +279,25 @@ export default function CreateRecipeScreen() {
     if (!result.canceled) setPhoto(result.assets[0].uri);
   };
 
+  // ── Step media picker ────────────────────────────────────────────────────
+  const pickStepMedia = async (index: number) => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images", "videos"],
+      allowsEditing: false,
+      quality: 0.8,
+    });
+    if (!result.canceled) {
+      const asset = result.assets[0];
+      setValue(`steps.${index}.media`, {
+        uri: asset.uri,
+        type: (asset.type ?? "image") as "image" | "video",
+      });
+    }
+  };
+
+  // Default image shown in the accordion placeholder
+  const defaultImageUri = CATEGORY_IMAGES[category] ?? DEFAULT_IMAGE;
+
   // ── Save handler ─────────────────────────────────────────────────────────
   const onSave = async (data: RecipeFormValues) => {
     if (!data.title.trim()) {
@@ -287,8 +305,10 @@ export default function CreateRecipeScreen() {
       return;
     }
 
+    const savedId = recipeId ?? Date.now().toString();
+
     const recipe = {
-      id: recipeId ?? Date.now().toString(),
+      id: savedId,
       title: data.title.trim(),
       description: data.description.trim(),
       tagline: "",
@@ -297,7 +317,7 @@ export default function CreateRecipeScreen() {
       servings: data.servings,
       rating: 0,
       ratingCount: 0,
-      imageUrl: photo ?? "",
+      imageUrl: photo ?? CATEGORY_IMAGES[data.category] ?? DEFAULT_IMAGE,
       username: data.authorName.trim() || "You",
       avatar: "",
       likes: 0,
@@ -306,11 +326,21 @@ export default function CreateRecipeScreen() {
       ingredients: data.ingredients.map((i) => i.value).filter(Boolean),
       steps: data.steps
         .filter((s) => s.value.trim())
-        .map((s) => ({ text: s.value, duration: s.duration ?? undefined })),
+        .map((s) => ({
+          text: s.value,
+          duration: s.duration ?? undefined,
+          imageUrl: s.media?.type === "image" ? s.media.uri : undefined,
+          videoUrl: s.media?.type === "video" ? s.media.uri : undefined,
+        })),
       isUserCreated: true as const,
       isPublic: data.isPublic,
-      difficulty: data.difficulty !== "" ? (data.difficulty as "Easy" | "Medium" | "Hard") : undefined,
-      primaryFlavors: data.primaryFlavors.length ? data.primaryFlavors : undefined,
+      difficulty:
+        data.difficulty !== ""
+          ? (data.difficulty as "Easy" | "Medium" | "Hard")
+          : undefined,
+      primaryFlavors: data.primaryFlavors.length
+        ? data.primaryFlavors
+        : undefined,
     };
 
     if (isEditing) {
@@ -319,13 +349,30 @@ export default function CreateRecipeScreen() {
       await saveUserRecipe(recipe);
     }
 
-    router.back();
+    // Clear the entire creation stack (create-recipe + add-recipe) then open
+    // the recipe detail — back from detail now goes straight to the Cook tab
+    router.dismissAll();
+    router.push(`/recipe/${savedId}`);
   };
+
+  // ── Grow ref arrays to match field array lengths ─────────────────────────
+  while (ingredientRowRefs.current.length < ingredientFields.length) {
+    ingredientRowRefs.current.push(createRef<View | null>());
+  }
+  while (ingredientInputRefs.current.length < ingredientFields.length) {
+    ingredientInputRefs.current.push(createRef<SmartTextInputHandle | null>());
+  }
+  while (stepRowRefs.current.length < stepFields.length) {
+    stepRowRefs.current.push(createRef<View | null>());
+  }
+  while (stepInputRefs.current.length < stepFields.length) {
+    stepInputRefs.current.push(createRef<SmartTextInputHandle | null>());
+  }
 
   const toastColors = {
     success: { bg: "#f0fdf4", text: "#15803d", border: "#bbf7d0" },
-    error: { bg: "#fef2f2", text: "#dc2626", border: "#fecaca" },
-    info: { bg: "#eff6ff", text: "#2563eb", border: "#bfdbfe" },
+    error:   { bg: "#fef2f2", text: "#dc2626", border: "#fecaca" },
+    info:    { bg: "#eff6ff", text: "#2563eb", border: "#bfdbfe" },
   };
 
   return (
@@ -336,20 +383,23 @@ export default function CreateRecipeScreen() {
           headerRight: () => (
             <TouchableOpacity
               onPress={handleSubmit(onSave)}
-              activeOpacity={0.7}
+              activeOpacity={0.8}
+              style={{
+                backgroundColor: "#000",
+                borderRadius: 8,
+                paddingHorizontal: 14,
+                paddingVertical: 6,
+              }}
             >
-              <Text style={{ fontSize: 16, fontWeight: "600", color: "#000" }}>
-                Save
+              <Text style={{ fontSize: 14, fontWeight: "700", color: "#fff" }}>
+                {isEditing ? "Update" : "Save"}
               </Text>
             </TouchableOpacity>
           ),
         }}
       />
 
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: "#fff" }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
+      <View style={{ flex: 1, backgroundColor: "#fff" }}>
         {/* ── Toast overlay ─────────────────────────────────── */}
         {toast && (
           <View
@@ -395,525 +445,467 @@ export default function CreateRecipeScreen() {
             >
               {toast.msg}
             </Text>
-            {usedFallback && toast.type === "success" && (
-              <View
-                style={{
-                  backgroundColor: "#e0e7ff",
-                  borderRadius: 999,
-                  paddingHorizontal: 7,
-                  paddingVertical: 2,
-                }}
-              >
-                <Text
-                  style={{ fontSize: 10, color: "#4338ca", fontWeight: "700" }}
-                >
-                  Cloud
-                </Text>
-              </View>
-            )}
           </View>
         )}
 
+        {/* ── Scrollable form ────────────────────────────────── */}
         <ScrollView
+          ref={scrollViewRef}
           style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 48 }}
+          contentContainerStyle={{ paddingBottom: 24 }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          automaticallyAdjustKeyboardInsets
         >
-          {/* ╔════════════════════════════════════════════════╗ */}
-          {/* ║  PASTE & PARSE SECTION                         ║ */}
-          {/* ╚════════════════════════════════════════════════╝ */}
-          <View
-            style={{
-              margin: 16,
-              backgroundColor: "#f9fafb",
-              borderRadius: 16,
-              padding: 16,
-              borderWidth: 1,
-              borderColor: "#e5e7eb",
-            }}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 6,
-                marginBottom: 10,
-              }}
-            >
-              <Ionicons name="sparkles" size={15} color="#7c3aed" />
-              <Text
-                style={{ fontSize: 13, fontWeight: "700", color: "#7c3aed" }}
-              >
-                Auto-fill from recipe text
-              </Text>
-            </View>
-            <TextInput
-              style={{
-                fontSize: 14,
-                color: "#111827",
-                borderWidth: 1,
-                borderColor: "#e5e7eb",
-                borderRadius: 10,
-                padding: 12,
-                minHeight: 80,
-                textAlignVertical: "top",
-                backgroundColor: "#fff",
-                lineHeight: 20,
-                marginBottom: 10,
-              }}
-              placeholder="Paste or type a recipe here and let AI fill in the fields below…"
-              placeholderTextColor="#9ca3af"
-              value={pasteText}
-              onChangeText={setPasteText}
-              multiline
-            />
-            <TouchableOpacity
-              onPress={() => parse(pasteText)}
-              disabled={!pasteText.trim() || isParsing}
-              style={{
-                backgroundColor:
-                  !pasteText.trim() || isParsing ? "#e5e7eb" : "#7c3aed",
-                borderRadius: 10,
-                paddingVertical: 12,
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-              }}
-              activeOpacity={0.85}
-            >
-              {isParsing ? (
-                <>
-                  <Animated.View
-                    style={{
-                      width: 14,
-                      height: 14,
-                      borderRadius: 7,
-                      backgroundColor: "#9ca3af",
-                      opacity: shimmerAnim,
-                    }}
-                  />
-                  <Text
-                    style={{
-                      fontSize: 14,
-                      fontWeight: "600",
-                      color: "#6b7280",
-                    }}
-                  >
-                    Parsing…
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <Ionicons name="sparkles-outline" size={15} color="#fff" />
-                  <Text
-                    style={{
-                      fontSize: 14,
-                      fontWeight: "600",
-                      color: "#fff",
-                    }}
-                  >
-                    Parse Recipe
-                  </Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {/* ── Cover photo ─────────────────────────────────── */}
-          <TouchableOpacity onPress={pickImage} activeOpacity={0.85}>
-            {photo ? (
-              <View
-                style={{ margin: 16, borderRadius: 12, overflow: "hidden" }}
-              >
-                <Image
-                  source={{ uri: photo }}
-                  style={{ width: "100%", aspectRatio: 16 / 9 }}
-                  contentFit="cover"
-                />
-                <TouchableOpacity
-                  onPress={() => setPhoto(null)}
-                  style={{
-                    position: "absolute",
-                    top: 8,
-                    right: 8,
-                    backgroundColor: "rgba(0,0,0,0.55)",
-                    borderRadius: 999,
-                    width: 28,
-                    height: 28,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Ionicons name="close" size={15} color="#fff" />
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View
-                style={{
-                  margin: 16,
-                  aspectRatio: 16 / 9,
-                  borderWidth: 1.5,
-                  borderColor: "#e5e7eb",
-                  borderStyle: "dashed",
-                  borderRadius: 12,
-                  backgroundColor: "#f9fafb",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 6,
-                }}
-              >
-                <Ionicons name="camera-outline" size={28} color="#9ca3af" />
-                <Text
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: 13,
-                    fontWeight: "500",
-                  }}
-                >
-                  Add Cover Photo
-                </Text>
-              </View>
-            )}
-          </TouchableOpacity>
-
           <View style={{ paddingHorizontal: 16 }}>
-            {/* ── Title ─────────────────────────────────────── */}
-            <Text style={LABEL_STYLE}>Title *</Text>
-            {isParsing ? (
-              <ShimmerBar anim={shimmerAnim} height={36} style={{ marginBottom: 24 }} />
-            ) : (
-              <Controller
-                control={control}
-                name="title"
-                render={({ field: { onChange, value } }) => (
-                  <TextInput
-                    style={{
-                      fontSize: 18,
-                      fontWeight: "500",
-                      color: "#000",
-                      borderBottomWidth: 1,
-                      borderBottomColor: "#e5e7eb",
-                      paddingBottom: 10,
-                      marginBottom: 24,
-                    }}
-                    placeholder="e.g. Creamy Tomato Pasta"
-                    placeholderTextColor="#9ca3af"
-                    value={value}
-                    onChangeText={onChange}
-                    returnKeyType="next"
-                  />
-                )}
-              />
-            )}
 
-            {/* ── Author ─────────────────────────────────────── */}
-            <Text style={LABEL_STYLE}>Author</Text>
+            {/* ── Title ─────────────────────────────────────── */}
+            <Text style={[LABEL_STYLE, { marginTop: 16 }]}>Title *</Text>
             <Controller
               control={control}
-              name="authorName"
+              name="title"
               render={({ field: { onChange, value } }) => (
                 <TextInput
                   style={{
-                    fontSize: 15,
+                    fontSize: 18,
+                    fontWeight: "500",
                     color: "#000",
                     borderBottomWidth: 1,
                     borderBottomColor: "#e5e7eb",
                     paddingBottom: 10,
-                    marginBottom: 24,
+                    marginBottom: 20,
                   }}
-                  placeholder="Your name"
+                  placeholder="e.g. Creamy Tomato Pasta"
                   placeholderTextColor="#9ca3af"
                   value={value}
                   onChangeText={onChange}
+                  autoFocus
                   returnKeyType="next"
                 />
               )}
             />
 
-            {/* ── Category ──────────────────────────────────── */}
-            <Text style={LABEL_STYLE}>Category</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={{ flexGrow: 0, marginBottom: 24 }}
-              contentContainerStyle={{ gap: 8 }}
-            >
-              {CATEGORIES.map((cat) => {
-                const active = category === cat;
-                return (
-                  <TouchableOpacity
-                    key={cat}
-                    onPress={() => setValue("category", cat)}
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 7,
-                      borderRadius: 999,
-                      backgroundColor: active ? "#000" : "#f3f4f6",
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 13,
-                        fontWeight: "500",
-                        color: active ? "#fff" : "#374151",
-                      }}
-                    >
-                      {cat}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            {/* ── Difficulty ────────────────────────────────── */}
-            <Text style={LABEL_STYLE}>Difficulty</Text>
-            {isParsing ? (
-              <ShimmerBar anim={shimmerAnim} height={40} style={{ marginBottom: 24 }} />
-            ) : (
-              <View style={{ flexDirection: "row", gap: 8, marginBottom: 24 }}>
-                {DIFFICULTIES.map((d) => {
-                  const active = difficulty === d;
-                  return (
-                    <TouchableOpacity
-                      key={d}
-                      onPress={() =>
-                        setValue("difficulty", active ? "" : d)
-                      }
-                      style={{
-                        flex: 1,
-                        paddingVertical: 9,
-                        borderRadius: 10,
-                        backgroundColor: active ? "#000" : "#f3f4f6",
-                        alignItems: "center",
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Text
-                        style={{
-                          fontSize: 13,
-                          fontWeight: "600",
-                          color: active ? "#fff" : "#374151",
-                        }}
-                      >
-                        {d}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            )}
-
-            {/* ── Cook Time + Servings ──────────────────────── */}
-            <View
-              style={{ flexDirection: "row", gap: 16, marginBottom: 24 }}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={LABEL_STYLE}>Cook Time</Text>
-                {isParsing ? (
-                  <ShimmerBar anim={shimmerAnim} height={36} />
-                ) : (
-                  <Controller
-                    control={control}
-                    name="cookTime"
-                    render={({ field: { onChange, value } }) => (
-                      <TextInput
-                        style={{
-                          fontSize: 15,
-                          color: "#000",
-                          borderBottomWidth: 1,
-                          borderBottomColor: "#e5e7eb",
-                          paddingBottom: 8,
-                        }}
-                        placeholder="e.g. 30 min"
-                        placeholderTextColor="#9ca3af"
-                        value={value}
-                        onChangeText={onChange}
-                        returnKeyType="next"
-                      />
-                    )}
-                  />
-                )}
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={LABEL_STYLE}>Servings</Text>
-                {isParsing ? (
-                  <ShimmerBar anim={shimmerAnim} height={36} />
-                ) : (
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 12,
-                    }}
-                  >
-                    <TouchableOpacity
-                      onPress={() =>
-                        setValue("servings", Math.max(1, servings - 1))
-                      }
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: 8,
-                        backgroundColor: "#f3f4f6",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Ionicons name="remove" size={18} color="#374151" />
-                    </TouchableOpacity>
-                    <Text
-                      style={{
-                        fontSize: 16,
-                        fontWeight: "600",
-                        color: "#000",
-                        minWidth: 24,
-                        textAlign: "center",
-                      }}
-                    >
-                      {servings}
-                    </Text>
-                    <TouchableOpacity
-                      onPress={() => setValue("servings", servings + 1)}
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: 8,
-                        backgroundColor: "#f3f4f6",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Ionicons name="add" size={18} color="#374151" />
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            </View>
-
-            {/* ── Description ──────────────────────────────── */}
-            <Text style={LABEL_STYLE}>Description</Text>
-            {isParsing ? (
-              <ShimmerBar anim={shimmerAnim} height={80} style={{ marginBottom: 24, borderRadius: 12 }} />
-            ) : (
-              <Controller
-                control={control}
-                name="description"
-                render={({ field: { onChange, value } }) => (
-                  <TextInput
-                    style={{
-                      fontSize: 14,
-                      color: "#000",
-                      borderWidth: 1,
-                      borderColor: "#e5e7eb",
-                      borderRadius: 12,
-                      padding: 12,
-                      marginBottom: 24,
-                      minHeight: 80,
-                      textAlignVertical: "top",
-                    }}
-                    placeholder="A short summary of your recipe…"
-                    placeholderTextColor="#9ca3af"
-                    value={value}
-                    onChangeText={onChange}
-                    multiline
-                    numberOfLines={3}
-                  />
-                )}
-              />
-            )}
-
-            {/* ── Primary Flavors ──────────────────────────── */}
-            <Text style={LABEL_STYLE}>Primary Flavors</Text>
-            <View
-              style={{
-                flexDirection: "row",
-                flexWrap: "wrap",
-                gap: 8,
-                marginBottom: 24,
-              }}
-            >
-              {FLAVOR_OPTIONS.map(({ label, value }) => {
-                const active = primaryFlavors.includes(value);
-                return (
-                  <TouchableOpacity
-                    key={value}
-                    onPress={() =>
-                      setValue(
-                        "primaryFlavors",
-                        active
-                          ? primaryFlavors.filter((f) => f !== value)
-                          : [...primaryFlavors, value]
-                      )
-                    }
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 8,
-                      borderRadius: 999,
-                      backgroundColor: active ? "#000" : "#f3f4f6",
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 13,
-                        fontWeight: "500",
-                        color: active ? "#fff" : "#374151",
-                      }}
-                    >
-                      {label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-
-            {/* ── Visibility toggle ─────────────────────────── */}
-            <View
+            {/* ── More details accordion toggle ─────────────── */}
+            <TouchableOpacity
+              onPress={toggleDetails}
+              activeOpacity={0.75}
               style={{
                 flexDirection: "row",
                 alignItems: "center",
-                justifyContent: "space-between",
-                paddingVertical: 14,
-                marginBottom: 24,
-                borderTopWidth: 0.5,
-                borderBottomWidth: 0.5,
+                gap: 8,
+                paddingVertical: 13,
+                paddingHorizontal: 14,
+                backgroundColor: "#f9fafb",
+                borderRadius: 12,
+                borderWidth: 1,
                 borderColor: "#e5e7eb",
+                marginBottom: 4,
               }}
             >
-              <View>
+              <Ionicons name="options-outline" size={16} color="#6b7280" />
+              <Text style={{ fontSize: 14, fontWeight: "600", color: "#374151" }}>
+                {isDetailsExpanded ? "Less details" : "More details"}
+              </Text>
+              {!isDetailsExpanded && accordionSummary && (
                 <Text
-                  style={{ fontSize: 15, fontWeight: "600", color: "#000" }}
+                  style={{
+                    flex: 1,
+                    fontSize: 12,
+                    color: "#9ca3af",
+                    marginLeft: 2,
+                  }}
+                  numberOfLines={1}
                 >
-                  {isPublic ? "Public recipe" : "Private recipe"}
+                  {accordionSummary}
                 </Text>
-                <Text
-                  style={{ fontSize: 13, color: "#9ca3af", marginTop: 2 }}
-                >
-                  {isPublic
-                    ? "Visible in Cook tab and Home feed"
-                    : "Only visible in your Cook tab"}
-                </Text>
-              </View>
-              <Controller
-                control={control}
-                name="isPublic"
-                render={({ field: { onChange, value } }) => (
-                  <Switch
-                    value={value}
-                    onValueChange={onChange}
-                    trackColor={{ false: "#e5e7eb", true: "#000" }}
-                    thumbColor="#fff"
-                  />
-                )}
-              />
-            </View>
+              )}
+              <Reanimated.View style={chevronStyle}>
+                <Ionicons name="chevron-down" size={16} color="#9ca3af" />
+              </Reanimated.View>
+            </TouchableOpacity>
 
-            {/* ── Ingredients ──────────────────────────────── */}
+            {/* ── Accordion content ─────────────────────────── */}
+            <Reanimated.View style={accordionStyle}>
+              <View onLayout={onDetailsLayout} style={{ paddingTop: 16 }}>
+
+                {/* ── Cover Photo ───────────────────────────── */}
+                <Text style={LABEL_STYLE}>Cover Photo</Text>
+                <TouchableOpacity
+                  onPress={pickImage}
+                  activeOpacity={0.85}
+                  style={{ marginBottom: 24 }}
+                >
+                  {photo ? (
+                    /* User-selected photo */
+                    <View style={{ borderRadius: 12, overflow: "hidden" }}>
+                      <Image
+                        source={{ uri: photo }}
+                        style={{ width: "100%", aspectRatio: 16 / 9 }}
+                        contentFit="cover"
+                      />
+                      <TouchableOpacity
+                        onPress={() => setPhoto(null)}
+                        style={{
+                          position: "absolute",
+                          top: 8,
+                          right: 8,
+                          backgroundColor: "rgba(0,0,0,0.55)",
+                          borderRadius: 999,
+                          width: 28,
+                          height: 28,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <Ionicons name="close" size={15} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    /* Default category image preview with overlay */
+                    <View
+                      style={{
+                        borderRadius: 12,
+                        overflow: "hidden",
+                        aspectRatio: 16 / 9,
+                      }}
+                    >
+                      <Image
+                        source={{ uri: defaultImageUri }}
+                        style={{ width: "100%", height: "100%" }}
+                        contentFit="cover"
+                      />
+                      <View
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          backgroundColor: "rgba(0,0,0,0.38)",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <Ionicons name="camera-outline" size={28} color="#fff" />
+                        <Text
+                          style={{
+                            color: "#fff",
+                            fontSize: 13,
+                            fontWeight: "600",
+                          }}
+                        >
+                          Add Photo
+                        </Text>
+                        <Text
+                          style={{
+                            color: "rgba(255,255,255,0.75)",
+                            fontSize: 11,
+                          }}
+                        >
+                          Default image will be used
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                </TouchableOpacity>
+
+                {/* ── Author ────────────────────────────────── */}
+                <Text style={LABEL_STYLE}>Author</Text>
+                <Controller
+                  control={control}
+                  name="authorName"
+                  render={({ field: { onChange, value } }) => (
+                    <TextInput
+                      style={{
+                        fontSize: 15,
+                        color: "#000",
+                        borderBottomWidth: 1,
+                        borderBottomColor: "#e5e7eb",
+                        paddingBottom: 10,
+                        marginBottom: 24,
+                      }}
+                      placeholder="Your name"
+                      placeholderTextColor="#9ca3af"
+                      value={value}
+                      onChangeText={onChange}
+                      returnKeyType="next"
+                    />
+                  )}
+                />
+
+                {/* ── Category ──────────────────────────────── */}
+                <Text style={LABEL_STYLE}>Category</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ flexGrow: 0, marginBottom: 24 }}
+                  contentContainerStyle={{ gap: 8 }}
+                >
+                  {CATEGORIES.map((cat) => {
+                    const active = category === cat;
+                    return (
+                      <TouchableOpacity
+                        key={cat}
+                        onPress={() => setValue("category", cat)}
+                        style={{
+                          paddingHorizontal: 14,
+                          paddingVertical: 7,
+                          borderRadius: 999,
+                          backgroundColor: active ? "#000" : "#f3f4f6",
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "500",
+                            color: active ? "#fff" : "#374151",
+                          }}
+                        >
+                          {cat}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* ── Difficulty ────────────────────────────── */}
+                <Text style={LABEL_STYLE}>Difficulty</Text>
+                <View
+                  style={{ flexDirection: "row", gap: 8, marginBottom: 24 }}
+                >
+                  {DIFFICULTIES.map((d) => {
+                    const active = difficulty === d;
+                    return (
+                      <TouchableOpacity
+                        key={d}
+                        onPress={() => setValue("difficulty", active ? "" : d)}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 9,
+                          borderRadius: 10,
+                          backgroundColor: active ? "#000" : "#f3f4f6",
+                          alignItems: "center",
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "600",
+                            color: active ? "#fff" : "#374151",
+                          }}
+                        >
+                          {d}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* ── Cook Time + Servings ──────────────────── */}
+                <View
+                  style={{ flexDirection: "row", gap: 16, marginBottom: 24 }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={LABEL_STYLE}>Cook Time</Text>
+                    <Controller
+                      control={control}
+                      name="cookTime"
+                      render={({ field: { onChange, value } }) => (
+                        <TextInput
+                          style={{
+                            fontSize: 15,
+                            color: "#000",
+                            borderBottomWidth: 1,
+                            borderBottomColor: "#e5e7eb",
+                            paddingBottom: 8,
+                          }}
+                          placeholder="e.g. 30 min"
+                          placeholderTextColor="#9ca3af"
+                          value={value}
+                          onChangeText={onChange}
+                          returnKeyType="next"
+                        />
+                      )}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={LABEL_STYLE}>Servings</Text>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 12,
+                      }}
+                    >
+                      <TouchableOpacity
+                        onPress={() =>
+                          setValue("servings", Math.max(1, servings - 1))
+                        }
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          backgroundColor: "#f3f4f6",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Ionicons name="remove" size={18} color="#374151" />
+                      </TouchableOpacity>
+                      <Text
+                        style={{
+                          fontSize: 16,
+                          fontWeight: "600",
+                          color: "#000",
+                          minWidth: 24,
+                          textAlign: "center",
+                        }}
+                      >
+                        {servings}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setValue("servings", servings + 1)}
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          backgroundColor: "#f3f4f6",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Ionicons name="add" size={18} color="#374151" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+
+                {/* ── Description ──────────────────────────── */}
+                <Text style={LABEL_STYLE}>Description</Text>
+                <Controller
+                  control={control}
+                  name="description"
+                  render={({ field: { onChange, value } }) => (
+                    <TextInput
+                      style={{
+                        fontSize: 14,
+                        color: "#000",
+                        borderWidth: 1,
+                        borderColor: "#e5e7eb",
+                        borderRadius: 12,
+                        padding: 12,
+                        marginBottom: 24,
+                        minHeight: 80,
+                        textAlignVertical: "top",
+                      }}
+                      placeholder="A short summary of your recipe…"
+                      placeholderTextColor="#9ca3af"
+                      value={value}
+                      onChangeText={onChange}
+                      multiline
+                      numberOfLines={3}
+                    />
+                  )}
+                />
+
+                {/* ── Primary Flavors ───────────────────────── */}
+                <Text style={LABEL_STYLE}>Primary Flavors</Text>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    gap: 8,
+                    marginBottom: 24,
+                  }}
+                >
+                  {FLAVOR_OPTIONS.map(({ label, value }) => {
+                    const active = primaryFlavors.includes(value);
+                    return (
+                      <TouchableOpacity
+                        key={value}
+                        onPress={() =>
+                          setValue(
+                            "primaryFlavors",
+                            active
+                              ? primaryFlavors.filter((f) => f !== value)
+                              : [...primaryFlavors, value]
+                          )
+                        }
+                        style={{
+                          paddingHorizontal: 14,
+                          paddingVertical: 8,
+                          borderRadius: 999,
+                          backgroundColor: active ? "#000" : "#f3f4f6",
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "500",
+                            color: active ? "#fff" : "#374151",
+                          }}
+                        >
+                          {label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {/* ── Visibility toggle ─────────────────────── */}
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    paddingVertical: 14,
+                    marginBottom: 16,
+                    borderTopWidth: 0.5,
+                    borderBottomWidth: 0.5,
+                    borderColor: "#e5e7eb",
+                  }}
+                >
+                  <View>
+                    <Text
+                      style={{ fontSize: 15, fontWeight: "600", color: "#000" }}
+                    >
+                      {isPublic ? "Public recipe" : "Private recipe"}
+                    </Text>
+                    <Text
+                      style={{ fontSize: 13, color: "#9ca3af", marginTop: 2 }}
+                    >
+                      {isPublic
+                        ? "Visible in Cook tab and Home feed"
+                        : "Only visible in your Cook tab"}
+                    </Text>
+                  </View>
+                  <Controller
+                    control={control}
+                    name="isPublic"
+                    render={({ field: { onChange, value } }) => (
+                      <Switch
+                        value={value}
+                        onValueChange={onChange}
+                        trackColor={{ false: "#e5e7eb", true: "#000" }}
+                        thumbColor="#fff"
+                      />
+                    )}
+                  />
+                </View>
+
+              </View>
+            </Reanimated.View>
+
+            {/* ── Spacer between accordion and core lists ─────── */}
+            <View style={{ height: 16 }} />
+
+            {/* ── Ingredients ──────────────────────────────────── */}
             <View
               style={{
                 flexDirection: "row",
@@ -923,9 +915,7 @@ export default function CreateRecipeScreen() {
               }}
             >
               <Text style={LABEL_STYLE}>Ingredients</Text>
-              <TouchableOpacity
-                onPress={() => appendIngredient({ value: "" })}
-              >
+              <TouchableOpacity onPress={() => appendIngredient({ value: "" })}>
                 <Text
                   style={{ fontSize: 14, fontWeight: "600", color: "#000" }}
                 >
@@ -934,58 +924,61 @@ export default function CreateRecipeScreen() {
               </TouchableOpacity>
             </View>
 
-            {isParsing ? (
-              <>
-                <ShimmerBar anim={shimmerAnim} height={36} style={{ marginBottom: 12 }} />
-                <ShimmerBar anim={shimmerAnim} height={36} style={{ marginBottom: 12 }} />
-                <ShimmerBar anim={shimmerAnim} height={36} style={{ marginBottom: 12 }} />
-              </>
-            ) : (
-              ingredientFields.map((field, index) => (
+            {ingredientFields.map((field, index) => (
+              <View
+                key={field.id}
+                ref={ingredientRowRefs.current[index]}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 12,
+                  marginBottom: 12,
+                }}
+              >
                 <View
-                  key={field.id}
                   style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 12,
-                    marginBottom: 12,
+                    width: 6,
+                    height: 6,
+                    borderRadius: 3,
+                    backgroundColor: "#9ca3af",
+                    flexShrink: 0,
                   }}
-                >
-                  <View
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 3,
-                      backgroundColor: "#9ca3af",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <Controller
-                    control={control}
-                    name={`ingredients.${index}.value`}
-                    render={({ field: { onChange, value } }) => (
-                      <SmartTextInput
-                        value={value}
-                        onChangeText={onChange}
-                        placeholder={`Ingredient ${index + 1}`}
-                        returnKeyType="next"
-                      />
-                    )}
-                  />
-                  {ingredientFields.length > 1 && (
-                    <TouchableOpacity onPress={() => removeIngredient(index)}>
-                      <Ionicons
-                        name="trash-outline"
-                        size={18}
-                        color="#9ca3af"
-                      />
-                    </TouchableOpacity>
+                />
+                <Controller
+                  control={control}
+                  name={`ingredients.${index}.value`}
+                  render={({ field: { onChange, value } }) => (
+                    <SmartTextInput
+                      ref={ingredientInputRefs.current[index]}
+                      value={value}
+                      onChangeText={onChange}
+                      placeholder={`Ingredient ${index + 1}`}
+                      returnKeyType="next"
+                      onFocus={() =>
+                        scrollToRef(ingredientRowRefs.current[index])
+                      }
+                      onSubmitEditing={() => {
+                        if (index === ingredientFields.length - 1) {
+                          // Last row — append a new one and focus it
+                          pendingIngredientFocusRef.current = index + 1;
+                          appendIngredient({ value: "" });
+                        } else {
+                          // Jump to the next existing row
+                          ingredientInputRefs.current[index + 1]?.current?.focus();
+                        }
+                      }}
+                    />
                   )}
-                </View>
-              ))
-            )}
+                />
+                {ingredientFields.length > 1 && (
+                  <TouchableOpacity onPress={() => removeIngredient(index)}>
+                    <Ionicons name="trash-outline" size={18} color="#9ca3af" />
+                  </TouchableOpacity>
+                )}
+              </View>
+            ))}
 
-            {/* ── Instructions ──────────────────────────────── */}
+            {/* ── Instructions ─────────────────────────────────── */}
             <View
               style={{
                 flexDirection: "row",
@@ -997,9 +990,7 @@ export default function CreateRecipeScreen() {
             >
               <Text style={LABEL_STYLE}>Instructions</Text>
               <TouchableOpacity
-                onPress={() =>
-                  appendStep({ value: "", duration: null })
-                }
+                onPress={() => appendStep({ value: "", duration: null, media: null })}
               >
                 <Text
                   style={{ fontSize: 14, fontWeight: "600", color: "#000" }}
@@ -1009,22 +1000,20 @@ export default function CreateRecipeScreen() {
               </TouchableOpacity>
             </View>
 
-            {isParsing ? (
-              <>
-                <ShimmerBar anim={shimmerAnim} height={60} style={{ marginBottom: 16, borderRadius: 10 }} />
-                <ShimmerBar anim={shimmerAnim} height={60} style={{ marginBottom: 16, borderRadius: 10 }} />
-              </>
-            ) : (
-              stepFields.map((field, index) => (
+            {stepFields.map((field, index) => {
+              const stepMedia = watchedSteps[index]?.media ?? null;
+              return (
                 <View
                   key={field.id}
+                  ref={stepRowRefs.current[index]}
                   style={{
                     flexDirection: "row",
                     alignItems: "flex-start",
-                    gap: 12,
+                    gap: 10,
                     marginBottom: 16,
                   }}
                 >
+                  {/* Step number */}
                   <View
                     style={{
                       width: 24,
@@ -1038,20 +1027,19 @@ export default function CreateRecipeScreen() {
                     }}
                   >
                     <Text
-                      style={{
-                        color: "#fff",
-                        fontSize: 11,
-                        fontWeight: "700",
-                      }}
+                      style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}
                     >
                       {index + 1}
                     </Text>
                   </View>
+
+                  {/* Step text — flex: 1 keeps it filling remaining width */}
                   <Controller
                     control={control}
                     name={`steps.${index}.value`}
                     render={({ field: { onChange, value } }) => (
                       <SmartTextInput
+                        ref={stepInputRefs.current[index]}
                         value={value}
                         onChangeText={onChange}
                         onTimeDetected={(secs) =>
@@ -1059,11 +1047,112 @@ export default function CreateRecipeScreen() {
                         }
                         placeholder={`Step ${index + 1}`}
                         multiline
+                        returnKeyType="next"
+                        blurOnSubmit={true}
+                        onFocus={() => scrollToRef(stepRowRefs.current[index])}
+                        onSubmitEditing={() => {
+                          if (index === stepFields.length - 1) {
+                            pendingStepFocusRef.current = index + 1;
+                            appendStep({ value: "", duration: null, media: null });
+                          } else {
+                            stepInputRefs.current[index + 1]?.current?.focus();
+                          }
+                        }}
                       />
                     )}
                   />
+
+                  {/* Media icon / thumbnail */}
+                  {stepMedia ? (
+                    /* Thumbnail with × to remove, tap body to replace */
+                    <View
+                      style={{
+                        width: 38,
+                        height: 38,
+                        borderRadius: 8,
+                        overflow: "hidden",
+                        marginTop: 2,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <TouchableOpacity
+                        onPress={() => pickStepMedia(index)}
+                        activeOpacity={0.85}
+                        style={{ width: "100%", height: "100%" }}
+                      >
+                        {stepMedia.type === "image" ? (
+                          <Image
+                            source={{ uri: stepMedia.uri }}
+                            style={{ width: "100%", height: "100%" }}
+                            contentFit="cover"
+                          />
+                        ) : (
+                          <View
+                            style={{
+                              flex: 1,
+                              backgroundColor: "#111827",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <Ionicons
+                              name="play-circle-outline"
+                              size={18}
+                              color="#fff"
+                            />
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                      {/* × remove */}
+                      <TouchableOpacity
+                        onPress={() =>
+                          setValue(`steps.${index}.media`, null)
+                        }
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          right: 0,
+                          backgroundColor: "rgba(0,0,0,0.62)",
+                          borderBottomLeftRadius: 6,
+                          width: 18,
+                          height: 18,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <Ionicons name="close" size={11} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    /* Empty icon button */
+                    <TouchableOpacity
+                      onPress={() => pickStepMedia(index)}
+                      activeOpacity={0.75}
+                      style={{
+                        width: 38,
+                        height: 38,
+                        borderRadius: 8,
+                        backgroundColor: "#f3f4f6",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        marginTop: 2,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <Ionicons
+                        name="images-outline"
+                        size={18}
+                        color="#9ca3af"
+                      />
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Trash */}
                   {stepFields.length > 1 && (
-                    <TouchableOpacity onPress={() => removeStep(index)}>
+                    <TouchableOpacity
+                      onPress={() => removeStep(index)}
+                      style={{ marginTop: 2 }}
+                    >
                       <Ionicons
                         name="trash-outline"
                         size={18}
@@ -1072,30 +1161,41 @@ export default function CreateRecipeScreen() {
                     </TouchableOpacity>
                   )}
                 </View>
-              ))
-            )}
+              );
+            })}
 
-            {/* ── Save button ───────────────────────────────── */}
-            <TouchableOpacity
-              onPress={handleSubmit(onSave)}
+            {/* ── Pro tip card ──────────────────────────────── */}
+            <View
               style={{
-                backgroundColor: "#000",
-                borderRadius: 16,
-                paddingVertical: 16,
-                alignItems: "center",
                 marginTop: 24,
+                backgroundColor: "#f9fafb",
+                borderRadius: 14,
+                padding: 16,
+                borderWidth: 1,
+                borderColor: "#f3f4f6",
               }}
-              activeOpacity={0.85}
             >
               <Text
-                style={{ color: "#fff", fontWeight: "700", fontSize: 16 }}
+                style={{
+                  fontSize: 11,
+                  fontWeight: "700",
+                  color: "#9ca3af",
+                  textTransform: "uppercase",
+                  letterSpacing: 1,
+                  marginBottom: 6,
+                }}
               >
-                {isEditing ? "Update Recipe" : "Save Recipe"}
+                💡 Pro tip
               </Text>
-            </TouchableOpacity>
+              <Text style={{ fontSize: 13, color: "#6b7280", lineHeight: 19 }}>
+                {COOKING_TIPS[tipIndex]}
+              </Text>
+            </View>
+
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+
+      </View>
     </>
   );
 }
