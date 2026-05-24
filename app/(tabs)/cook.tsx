@@ -181,7 +181,13 @@ export default function CookScreen() {
               prefillTitle: recipe.title,
               prefillDescription: recipe.description,
               prefillIngredients: JSON.stringify(recipe.ingredients),
-              prefillSteps: JSON.stringify(recipe.steps.map((s) => s.text)),
+              prefillSteps: JSON.stringify(
+                recipe.steps.map((s) => ({
+                  text: s.text,
+                  imageUrl: s.imageUrl ?? null,
+                  videoUrl: s.videoUrl ?? null,
+                }))
+              ),
               prefillImage: recipe.imageUrl,
               prefillCategory: recipe.category,
               prefillDifficulty: recipe.difficulty ?? "",

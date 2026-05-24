@@ -23,7 +23,8 @@ import Reanimated, {
 } from "react-native-reanimated";
 import { saveUserRecipe, updateUserRecipe } from "@/lib/recipeStore";
 import SmartTextInput, { type SmartTextInputHandle } from "@/components/SmartTextInput";
-import type { RecipeFormValues } from "@/src/types/recipe";
+import type { IngredientField, RecipeFormValues } from "@/src/types/recipe";
+import { stripMeasurement } from "@/lib/measurementDetection";
 
 // ─────────────────────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -70,6 +71,32 @@ const CATEGORY_IMAGES: Record<string, string> = {
   Snack:     "https://picsum.photos/seed/snack-food/600/400",
 };
 const DEFAULT_IMAGE = "https://picsum.photos/seed/recipe-default/600/400";
+
+/** Returns up to 5 ingredient names whose first word starts with the last typed word (≥3 chars). */
+function getIngredientSuggestions(
+  stepText: string,
+  ingredients: IngredientField[]
+): string[] {
+  const tokens = stepText.trimEnd().split(/\s+/);
+  const lastWord = tokens[tokens.length - 1] ?? "";
+  if (lastWord.length < 3) return [];
+  const lw = lastWord.toLowerCase();
+
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  for (const ing of ingredients) {
+    if (!ing.value.trim()) continue;
+    const name = stripMeasurement(ing.value);
+    const firstWord = name.toLowerCase().split(/\s+/)[0] ?? "";
+    if (firstWord.startsWith(lw) && firstWord !== lw && !seen.has(name)) {
+      seen.add(name);
+      results.push(name);
+    }
+    if (results.length === 5) break;
+  }
+  return results;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CreateRecipeScreen() {
@@ -149,11 +176,24 @@ export default function CreateRecipeScreen() {
         ? (JSON.parse(prefillIngredients) as string[]).map((v) => ({ value: v }))
         : [{ value: "" }],
       steps: prefillSteps
-        ? (JSON.parse(prefillSteps) as string[]).map((v) => ({
-            value: v,
-            duration: null,
-            media: null,
-          }))
+        ? (
+            JSON.parse(prefillSteps) as Array<
+              string | { text: string; imageUrl?: string | null; videoUrl?: string | null }
+            >
+          ).map((v) => {
+            if (typeof v === "string") {
+              return { value: v, duration: null, media: null };
+            }
+            return {
+              value: v.text,
+              duration: null,
+              media: v.videoUrl
+                ? { uri: v.videoUrl, type: "video" as const }
+                : v.imageUrl
+                ? { uri: v.imageUrl, type: "image" as const }
+                : null,
+            };
+          })
         : [{ value: "", duration: null, media: null }],
     },
   });
@@ -178,6 +218,8 @@ export default function CreateRecipeScreen() {
   const primaryFlavors = watch("primaryFlavors");
   const isPublic = watch("isPublic");
   const watchedSteps = watch("steps");
+  const watchedIngredients = watch("ingredients");
+  const [focusedStepIndex, setFocusedStepIndex] = useState<number | null>(null);
 
   // ── Photo (not a form field) ─────────────────────────────────────────────
   const [photo, setPhoto] = useState<string | null>(prefillImage ?? null);
@@ -952,6 +994,7 @@ export default function CreateRecipeScreen() {
                       ref={ingredientInputRefs.current[index]}
                       value={value}
                       onChangeText={onChange}
+                      enableMeasurements
                       placeholder={`Ingredient ${index + 1}`}
                       returnKeyType="next"
                       onFocus={() =>
@@ -1006,13 +1049,9 @@ export default function CreateRecipeScreen() {
                 <View
                   key={field.id}
                   ref={stepRowRefs.current[index]}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "flex-start",
-                    gap: 10,
-                    marginBottom: 16,
-                  }}
+                  style={{ marginBottom: 16 }}
                 >
+                <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 10 }}>
                   {/* Step number */}
                   <View
                     style={{
@@ -1049,7 +1088,10 @@ export default function CreateRecipeScreen() {
                         multiline
                         returnKeyType="next"
                         blurOnSubmit={true}
-                        onFocus={() => scrollToRef(stepRowRefs.current[index])}
+                        onFocus={() => {
+                          setFocusedStepIndex(index);
+                          scrollToRef(stepRowRefs.current[index]);
+                        }}
                         onSubmitEditing={() => {
                           if (index === stepFields.length - 1) {
                             pendingStepFocusRef.current = index + 1;
@@ -1160,6 +1202,65 @@ export default function CreateRecipeScreen() {
                       />
                     </TouchableOpacity>
                   )}
+                </View>{/* end inner row */}
+
+                {/* Ingredient autocomplete chips */}
+                {focusedStepIndex === index && (() => {
+                  const suggestions = getIngredientSuggestions(
+                    watchedSteps[index]?.value ?? "",
+                    watchedIngredients ?? []
+                  );
+                  if (suggestions.length === 0) return null;
+                  return (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      keyboardShouldPersistTaps="always"
+                      contentContainerStyle={{
+                        paddingTop: 8,
+                        paddingLeft: 34, // align with text input (24px badge + 10px gap)
+                        paddingRight: 4,
+                        gap: 6,
+                      }}
+                    >
+                      {suggestions.map((name) => (
+                        <TouchableOpacity
+                          key={name}
+                          onPress={() => {
+                            const current = watchedSteps[index]?.value ?? "";
+                            const tokens = current.trimEnd().split(/\s+/);
+                            tokens[tokens.length - 1] = name;
+                            setValue(`steps.${index}.value`, tokens.join(" ") + " ");
+                          }}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 4,
+                            backgroundColor: "#f3f4f6",
+                            borderRadius: 999,
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                          }}
+                        >
+                          <Ionicons
+                            name="add-circle-outline"
+                            size={13}
+                            color="#6b7280"
+                          />
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              color: "#374151",
+                              fontWeight: "500",
+                            }}
+                          >
+                            {name}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  );
+                })()}
                 </View>
               );
             })}

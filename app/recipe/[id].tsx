@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Dimensions,
@@ -18,6 +18,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { RECIPES, Recipe, RecipeStep } from "@/lib/mockData";
 import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
+import { extractMeasurement, extractLeadingCount } from "@/lib/measurementDetection";
+import { buildIngredientNames, segmentIngredients } from "@/lib/ingredientHighlight";
 import * as Notifications from "expo-notifications";
 import * as Haptics from "expo-haptics";
 import { detectDurationFromText } from "@/lib/detectDuration";
@@ -26,6 +28,21 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function splitIngredient(raw: string): { name: string; measurement: string | null } {
+  const m = extractMeasurement(raw);
+  if (m) {
+    const name = raw.replace(m.raw, "").replace(/^[\s,]+|[\s,]+$/g, "").trim();
+    return { name: name || raw, measurement: m.normalised };
+  }
+  const count = extractLeadingCount(raw);
+  if (count) {
+    // Strip the leading number from the display name
+    const name = raw.replace(/^\d+(?:[\/\.]\d+)?\s*/, "").trim();
+    return { name: name || raw, measurement: count };
+  }
+  return { name: raw, measurement: null };
 }
 
 // ── Ingredients Sheet ──────────────────────────────────────────────────────────
@@ -136,6 +153,12 @@ function InstructionModal({
   const notifIdRef = useRef<string | null>(null);
 
   const currentStep = steps[activeStep];
+
+  // Pre-build ingredient names once — used to highlight them in step text
+  const ingredientNames = useMemo(
+    () => buildIngredientNames(ingredients),
+    [ingredients]
+  );
 
   // Reset on open
   useEffect(() => {
@@ -260,6 +283,16 @@ function InstructionModal({
 
   const hasDuration = effectiveDuration !== null && effectiveDuration > 0;
 
+  const handleReset = async () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setTimerRunning(false);
+    if (notifIdRef.current) {
+      await Notifications.cancelScheduledNotificationAsync(notifIdRef.current);
+      notifIdRef.current = null;
+    }
+    setTimerSeconds(effectiveDuration);
+  };
+
   // Dynamic snap: measure each card's rendered height and compute exact offsets.
   // marginBottom (8) is not captured by onLayout, so we add it manually.
   const MARGIN = 8;
@@ -351,61 +384,6 @@ function InstructionModal({
           </Text>
         </View>
 
-        {/* Circular timer — only shown when step has a duration */}
-        {hasDuration && (
-          <TouchableOpacity
-            onPress={handleTimerTap}
-            activeOpacity={0.85}
-            style={{ alignItems: "center", marginVertical: 16 }}
-          >
-            <View
-              style={{
-                width: 180,
-                height: 180,
-                borderRadius: 90,
-                backgroundColor:
-                  timerSeconds === 0
-                    ? "#14532d"
-                    : timerRunning
-                    ? "#1a1a1a"
-                    : "#2d2d2d",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 6,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: 40,
-                  fontWeight: "700",
-                  fontVariant: ["tabular-nums"],
-                  color: timerSeconds === 0 ? "#4ade80" : "#fff",
-                }}
-              >
-                {timerSeconds === 0
-                  ? "Done"
-                  : formatTime(timerSeconds ?? effectiveDuration!)}
-              </Text>
-              <Ionicons
-                name={
-                  timerSeconds === 0
-                    ? "checkmark-circle"
-                    : timerRunning
-                    ? "pause"
-                    : "play"
-                }
-                size={28}
-                color={timerSeconds === 0 ? "#4ade80" : "#aaa"}
-              />
-            </View>
-            {!timerRunning && timerSeconds !== 0 && (
-              <Text style={{ color: "#555", fontSize: 12, marginTop: 8 }}>
-                Tap to start
-              </Text>
-            )}
-          </TouchableOpacity>
-        )}
-
         {/* Gesture-driven step list — PanResponder classifies small/big swipe */}
         <View style={{ flex: 1 }} {...panResponder.panHandlers}>
         <FlatList
@@ -466,7 +444,31 @@ function InstructionModal({
                     lineHeight: 21,
                   }}
                 >
-                  {item.text}
+                  {segmentIngredients(item.text, ingredientNames).map((seg, si) =>
+                    seg.isHighlight ? (
+                      <Text
+                        key={si}
+                        style={
+                          isActive
+                            ? {
+                                backgroundColor: "#DBEAFE",
+                                color: "#1d4ed8",
+                                fontWeight: "600",
+                                borderRadius: 3,
+                                overflow: "hidden",
+                              }
+                            : {
+                                color: "#60a5fa",
+                                fontWeight: "600",
+                              }
+                        }
+                      >
+                        {seg.text}
+                      </Text>
+                    ) : (
+                      <Text key={si}>{seg.text}</Text>
+                    )
+                  )}
                 </Text>
                 {item.imageUrl && (
                   <Image
@@ -480,6 +482,93 @@ function InstructionModal({
           }}
         />
         </View>
+
+        {/* Corner timer — sits above PiP when both present */}
+        {hasDuration && !pipExpanded && (() => {
+          const hasPip = !!(currentStep?.imageUrl || currentStep?.videoUrl);
+          const isDone = timerSeconds === 0;
+          const timerBottom = hasPip
+            ? 20 + insets.bottom + 116 + 10
+            : 20 + insets.bottom;
+
+          return (
+            <View
+              style={{
+                position: "absolute",
+                bottom: timerBottom,
+                right: 16,
+                backgroundColor: isDone ? "#14532d" : "#1c1c1c",
+                borderRadius: 16,
+                paddingHorizontal: 14,
+                paddingVertical: 10,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 10,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.45,
+                shadowRadius: 10,
+                elevation: 10,
+              }}
+            >
+              {/* Time display */}
+              <Text
+                style={{
+                  fontSize: 24,
+                  fontWeight: "700",
+                  fontVariant: ["tabular-nums"],
+                  color: isDone ? "#4ade80" : "#fff",
+                  minWidth: detecting ? 40 : 58,
+                  textAlign: "center",
+                }}
+              >
+                {detecting
+                  ? "···"
+                  : isDone
+                  ? "Done!"
+                  : formatTime(timerSeconds ?? effectiveDuration!)}
+              </Text>
+
+              {/* Play / Pause */}
+              <TouchableOpacity
+                onPress={handleTimerTap}
+                disabled={detecting || isDone}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 18,
+                  backgroundColor: isDone ? "#166534" : timerRunning ? "#374151" : "#fff",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: detecting ? 0.4 : 1,
+                }}
+              >
+                <Ionicons
+                  name={timerRunning ? "pause" : "play"}
+                  size={16}
+                  color={isDone ? "#4ade80" : timerRunning ? "#fff" : "#111"}
+                />
+              </TouchableOpacity>
+
+              {/* Reset */}
+              <TouchableOpacity
+                onPress={handleReset}
+                disabled={detecting}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 18,
+                  backgroundColor: "#2a2a2a",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: detecting ? 0.4 : 1,
+                }}
+              >
+                <Ionicons name="refresh" size={16} color="#9ca3af" />
+              </TouchableOpacity>
+            </View>
+          );
+        })()}
 
         {/* PiP — floating media preview for the active step */}
         {!!(currentStep?.imageUrl || currentStep?.videoUrl) && (() => {
@@ -651,7 +740,13 @@ export default function RecipeDetailScreen() {
         prefillTitle: recipe.title,
         prefillDescription: recipe.description,
         prefillIngredients: JSON.stringify(recipe.ingredients),
-        prefillSteps: JSON.stringify(recipe.steps.map((s) => s.text)),
+        prefillSteps: JSON.stringify(
+          recipe.steps.map((s) => ({
+            text: s.text,
+            imageUrl: s.imageUrl ?? null,
+            videoUrl: s.videoUrl ?? null,
+          }))
+        ),
         prefillImage: recipe.imageUrl,
         prefillCategory: recipe.category,
         prefillDifficulty: recipe.difficulty ?? "",
@@ -893,33 +988,57 @@ export default function RecipeDetailScreen() {
                 >
                   Ingredients
                 </Text>
-                {recipe.ingredients.map((ing, i) => (
-                  <View
-                    key={i}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "flex-start",
-                      gap: 12,
-                      paddingVertical: 10,
-                      borderBottomWidth: 0.5,
-                      borderBottomColor: "#f3f4f6",
-                    }}
-                  >
+                {recipe.ingredients.map((ing, i) => {
+                  const { name, measurement } = splitIngredient(ing);
+                  return (
                     <View
+                      key={i}
                       style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: 3,
-                        backgroundColor: "#9ca3af",
-                        marginTop: 7,
-                        flexShrink: 0,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 12,
+                        paddingVertical: 10,
+                        borderBottomWidth: 0.5,
+                        borderBottomColor: "#f3f4f6",
                       }}
-                    />
-                    <Text style={{ flex: 1, fontSize: 15, color: "#111", lineHeight: 22 }}>
-                      {ing}
-                    </Text>
-                  </View>
-                ))}
+                    >
+                      {/* Bullet */}
+                      <View
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: 3,
+                          backgroundColor: "#9ca3af",
+                          flexShrink: 0,
+                        }}
+                      />
+                      {/* Ingredient name */}
+                      <Text style={{ flex: 1, fontSize: 15, color: "#111", lineHeight: 22 }}>
+                        {name}
+                      </Text>
+                      {/* Measurement pill */}
+                      {measurement && (
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 3,
+                            backgroundColor: "#D1FAE5",
+                            borderRadius: 999,
+                            paddingHorizontal: 8,
+                            paddingVertical: 3,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <Ionicons name="scale-outline" size={11} color="#059669" />
+                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#059669" }}>
+                            {measurement}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
               </>
             )}
           </View>
