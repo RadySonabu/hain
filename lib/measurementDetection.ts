@@ -27,7 +27,7 @@ const UNIT_PATTERN = [
   "slices?",
   "bunch(?:es)?",
   "cans?",
-  "pack(?:ets?)?",
+  "pack(?:ets?)?", "pkts?", "pck",
   "handfuls?",
   "pinch(?:es)?",
   "dash(?:es)?",
@@ -40,7 +40,19 @@ const QTY_PATTERN =
 
 // Full pattern: quantity + optional whitespace + unit (case-insensitive)
 const MEASUREMENT_REGEX = new RegExp(
-  `(${QTY_PATTERN})\\s*(${UNIT_PATTERN})`,
+  `(${QTY_PATTERN})\\s*(${UNIT_PATTERN})\\b`,
+  "gi"
+);
+
+// ── Compound packaging pattern ────────────────────────────────────────────────
+// Matches "1 500g pack", "2 400ml cans", "3 250g bags" as a single span.
+// Format: COUNT  WEIGHT/VOLUME_QTY  WEIGHT/VOLUME_UNIT  CONTAINER_UNIT
+const COUNT_UNITS =
+  "pack(?:ets?)?|pkts?|pck|cans?|bottles?|bags?|jars?|boxes?|box(?:es)?";
+const WEIGHT_VOLUME_UNITS = "kg|g|ml|l|oz|lb";
+
+const PACKAGING_REGEX = new RegExp(
+  `(${QTY_PATTERN})\\s+(${QTY_PATTERN})\\s*(${WEIGHT_VOLUME_UNITS})\\b\\s*(${COUNT_UNITS})\\b`,
   "gi"
 );
 
@@ -63,7 +75,7 @@ function normaliseUnit(raw: string): string {
   if (/^slices?$/.test(u)) return u.endsWith("s") ? "slices" : "slice";
   if (/^bunch(es)?$/.test(u)) return "bunch";
   if (/^cans?$/.test(u)) return u.endsWith("s") ? "cans" : "can";
-  if (/^pack(ets?)?$/.test(u)) return "pack";
+  if (/^pack(ets?)?$|^pkts?$|^pck$/.test(u)) return "pack";
   if (/^handfuls?$/.test(u)) return "handful";
   if (/^pinch(es)?$/.test(u)) return "pinch";
   if (/^dash(es)?$/.test(u)) return "dash";
@@ -80,23 +92,34 @@ export function normaliseMeasurement(amount: string, unit: string): string {
 
 /** Splits text into plain and measurement-highlighted segments. */
 export function segmentMeasurements(text: string): Segment[] {
-  const segments: Segment[] = [];
+  // Per-character highlight flag
+  const tagged = new Array<boolean>(text.length).fill(false);
+
+  // 1. Compound packaging spans first (higher priority)
+  PACKAGING_REGEX.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PACKAGING_REGEX.exec(text)) !== null) {
+    for (let i = m.index; i < m.index + m[0].length; i++) tagged[i] = true;
+  }
+
+  // 2. Standard measurement spans (skip chars already covered by compound)
   MEASUREMENT_REGEX.lastIndex = 0;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = MEASUREMENT_REGEX.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ text: text.slice(lastIndex, match.index), isHighlight: false });
+  while ((m = MEASUREMENT_REGEX.exec(text)) !== null) {
+    if (!tagged[m.index]) {
+      for (let i = m.index; i < m.index + m[0].length; i++) tagged[i] = true;
     }
-    segments.push({ text: match[0], isHighlight: true });
-    lastIndex = match.index + match[0].length;
   }
 
-  if (lastIndex < text.length) {
-    segments.push({ text: text.slice(lastIndex), isHighlight: false });
+  // 3. Collapse into runs
+  const segments: Segment[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const isHighlight = tagged[i];
+    let j = i + 1;
+    while (j < text.length && tagged[j] === isHighlight) j++;
+    segments.push({ text: text.slice(i, j), isHighlight });
+    i = j;
   }
-
   return segments.length > 0 ? segments : [{ text, isHighlight: false }];
 }
 

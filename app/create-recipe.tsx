@@ -24,7 +24,9 @@ import Reanimated, {
 import { saveUserRecipe, updateUserRecipe } from "@/lib/recipeStore";
 import SmartTextInput, { type SmartTextInputHandle } from "@/components/SmartTextInput";
 import type { IngredientField, RecipeFormValues } from "@/src/types/recipe";
-import { stripMeasurement } from "@/lib/measurementDetection";
+import { stripMeasurement, extractMeasurement } from "@/lib/measurementDetection";
+import { buildIngredientNames } from "@/lib/ingredientHighlight";
+import { INGREDIENT_MEASUREMENTS, FALLBACK_MEASUREMENTS } from "@/lib/commonIngredients";
 
 // ─────────────────────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -96,6 +98,66 @@ function getIngredientSuggestions(
     if (results.length === 5) break;
   }
   return results;
+}
+
+/**
+ * Returns the leading measurement raw string if the text begins with a
+ * recognised measurement, otherwise null.
+ * e.g. "1kg" → "1kg"  |  "1kg chi" → "1kg"  |  "chicken" → null
+ */
+function getLeadingMeasurement(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const m = extractMeasurement(trimmed);
+  if (!m) return null;
+  return trimmed.startsWith(m.raw) ? m.raw : null;
+}
+
+/**
+ * Measurement-first flow: text starts with a measurement → suggest ingredient
+ * names from OTHER already-entered rows, optionally filtered by partial text
+ * typed after the measurement.
+ */
+function getMeasurementFirstSuggestions(
+  text: string,
+  currentIndex: number,
+  ingredients: IngredientField[]
+): string[] {
+  const leading = getLeadingMeasurement(text);
+  if (!leading) return [];
+  const afterMeasurement = text.trim().slice(leading.length).trim().toLowerCase();
+
+  const seen = new Set<string>();
+  const results: string[] = [];
+  for (let i = 0; i < ingredients.length; i++) {
+    if (i === currentIndex) continue;
+    const name = stripMeasurement(ingredients[i].value).trim().toLowerCase();
+    if (!name) continue;
+    if (!seen.has(name) && (afterMeasurement === "" || name.startsWith(afterMeasurement))) {
+      seen.add(name);
+      results.push(name);
+      if (results.length === 5) break;
+    }
+  }
+  return results;
+}
+
+/**
+ * Ingredient-first flow: text has no leading measurement → suggest measurements.
+ * Looks up INGREDIENT_MEASUREMENTS by first-word prefix, falls back to
+ * FALLBACK_MEASUREMENTS.
+ */
+function getIngredientFirstSuggestions(text: string): string[] {
+  const trimmed = text.trim().toLowerCase();
+  if (!trimmed) return [];
+  // If there's any measurement in the text already, skip
+  if (extractMeasurement(trimmed)) return [];
+  const firstWord = trimmed.split(/\s+/)[0];
+  const matchKey = Object.keys(INGREDIENT_MEASUREMENTS).find(
+    (k) => k.split(" ")[0].startsWith(firstWord) || firstWord.startsWith(k.split(" ")[0])
+  );
+  const specific = matchKey ? INGREDIENT_MEASUREMENTS[matchKey] : [];
+  return [...new Set([...specific, ...FALLBACK_MEASUREMENTS])].slice(0, 5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +282,13 @@ export default function CreateRecipeScreen() {
   const watchedSteps = watch("steps");
   const watchedIngredients = watch("ingredients");
   const [focusedStepIndex, setFocusedStepIndex] = useState<number | null>(null);
+  const [focusedIngredientIndex, setFocusedIngredientIndex] = useState<number | null>(null);
+
+  // Pre-built ingredient names for step input highlighting
+  const stepIngredientNames = useMemo(
+    () => buildIngredientNames((watchedIngredients ?? []).map((f) => f.value)),
+    [watchedIngredients]
+  );
 
   // ── Photo (not a form field) ─────────────────────────────────────────────
   const [photo, setPhoto] = useState<string | null>(prefillImage ?? null);
@@ -970,54 +1039,129 @@ export default function CreateRecipeScreen() {
               <View
                 key={field.id}
                 ref={ingredientRowRefs.current[index]}
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 12,
-                  marginBottom: 12,
-                }}
+                style={{ marginBottom: 12 }}
               >
+                {/* Input row */}
                 <View
                   style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 3,
-                    backgroundColor: "#9ca3af",
-                    flexShrink: 0,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 12,
                   }}
-                />
-                <Controller
-                  control={control}
-                  name={`ingredients.${index}.value`}
-                  render={({ field: { onChange, value } }) => (
-                    <SmartTextInput
-                      ref={ingredientInputRefs.current[index]}
-                      value={value}
-                      onChangeText={onChange}
-                      enableMeasurements
-                      placeholder={`Ingredient ${index + 1}`}
-                      returnKeyType="next"
-                      onFocus={() =>
-                        scrollToRef(ingredientRowRefs.current[index])
-                      }
-                      onSubmitEditing={() => {
-                        if (index === ingredientFields.length - 1) {
-                          // Last row — append a new one and focus it
-                          pendingIngredientFocusRef.current = index + 1;
-                          appendIngredient({ value: "" });
-                        } else {
-                          // Jump to the next existing row
-                          ingredientInputRefs.current[index + 1]?.current?.focus();
-                        }
-                      }}
-                    />
+                >
+                  <View
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 3,
+                      backgroundColor: "#9ca3af",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <Controller
+                    control={control}
+                    name={`ingredients.${index}.value`}
+                    render={({ field: { onChange, value } }) => (
+                      <SmartTextInput
+                        ref={ingredientInputRefs.current[index]}
+                        value={value}
+                        onChangeText={onChange}
+                        enableMeasurements
+                        placeholder={`Ingredient ${index + 1}`}
+                        returnKeyType="next"
+                        onFocus={() => {
+                          setFocusedIngredientIndex(index);
+                          setFocusedStepIndex(null);
+                          scrollToRef(ingredientRowRefs.current[index]);
+                        }}
+                        onBlur={() => setTimeout(() => setFocusedIngredientIndex(null), 200)}
+                        onSubmitEditing={() => {
+                          if (index === ingredientFields.length - 1) {
+                            // Last row — append a new one and focus it
+                            pendingIngredientFocusRef.current = index + 1;
+                            appendIngredient({ value: "" });
+                          } else {
+                            // Jump to the next existing row
+                            ingredientInputRefs.current[index + 1]?.current?.focus();
+                          }
+                        }}
+                      />
+                    )}
+                  />
+                  {ingredientFields.length > 1 && (
+                    <TouchableOpacity onPress={() => removeIngredient(index)}>
+                      <Ionicons name="trash-outline" size={18} color="#9ca3af" />
+                    </TouchableOpacity>
                   )}
-                />
-                {ingredientFields.length > 1 && (
-                  <TouchableOpacity onPress={() => removeIngredient(index)}>
-                    <Ionicons name="trash-outline" size={18} color="#9ca3af" />
-                  </TouchableOpacity>
-                )}
+                </View>
+
+                {/* Bi-directional suggestion chips */}
+                {focusedIngredientIndex === index && (() => {
+                  const text = watchedIngredients?.[index]?.value ?? "";
+                  const isMeasurementFirst = !!getLeadingMeasurement(text);
+                  const suggestions = isMeasurementFirst
+                    ? getMeasurementFirstSuggestions(text, index, watchedIngredients ?? [])
+                    : getIngredientFirstSuggestions(text);
+                  if (suggestions.length === 0) return null;
+                  return (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      keyboardShouldPersistTaps="always"
+                      contentContainerStyle={{
+                        paddingTop: 8,
+                        paddingLeft: 18,
+                        paddingRight: 4,
+                        gap: 6,
+                      }}
+                    >
+                      {suggestions.map((suggestion) => (
+                        <TouchableOpacity
+                          key={suggestion}
+                          onPress={() => {
+                            const current = watchedIngredients?.[index]?.value ?? "";
+                            if (isMeasurementFirst) {
+                              const leading = getLeadingMeasurement(current)!;
+                              setValue(
+                                `ingredients.${index}.value`,
+                                leading + " " + suggestion
+                              );
+                            } else {
+                              setValue(
+                                `ingredients.${index}.value`,
+                                suggestion + " " + current.trim()
+                              );
+                            }
+                          }}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 4,
+                            backgroundColor: "#DBEAFE",
+                            borderRadius: 999,
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                          }}
+                        >
+                          <Ionicons
+                            name={isMeasurementFirst ? "leaf-outline" : "scale-outline"}
+                            size={13}
+                            color="#1d4ed8"
+                          />
+                          <Text
+                            style={{
+                              fontSize: 12,
+                              color: "#1d4ed8",
+                              fontWeight: "600",
+                            }}
+                          >
+                            {suggestion}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  );
+                })()}
               </View>
             ))}
 
@@ -1084,14 +1228,18 @@ export default function CreateRecipeScreen() {
                         onTimeDetected={(secs) =>
                           setValue(`steps.${index}.duration`, secs)
                         }
+                        enableMeasurements
+                        ingredientNames={stepIngredientNames}
                         placeholder={`Step ${index + 1}`}
                         multiline
                         returnKeyType="next"
                         blurOnSubmit={true}
                         onFocus={() => {
                           setFocusedStepIndex(index);
+                          setFocusedIngredientIndex(null);
                           scrollToRef(stepRowRefs.current[index]);
                         }}
+                        onBlur={() => setTimeout(() => setFocusedStepIndex(null), 200)}
                         onSubmitEditing={() => {
                           if (index === stepFields.length - 1) {
                             pendingStepFocusRef.current = index + 1;
@@ -1204,13 +1352,12 @@ export default function CreateRecipeScreen() {
                   )}
                 </View>{/* end inner row */}
 
-                {/* Ingredient autocomplete chips */}
+                {/* Live hints row: measurement badge + ingredient autocomplete chips */}
                 {focusedStepIndex === index && (() => {
-                  const suggestions = getIngredientSuggestions(
-                    watchedSteps[index]?.value ?? "",
-                    watchedIngredients ?? []
-                  );
-                  if (suggestions.length === 0) return null;
+                  const text = watchedSteps[index]?.value ?? "";
+                  const suggestions = getIngredientSuggestions(text, watchedIngredients ?? []);
+                  const detectedMeasurement = extractMeasurement(text);
+                  if (suggestions.length === 0 && !detectedMeasurement) return null;
                   return (
                     <ScrollView
                       horizontal
@@ -1218,11 +1365,42 @@ export default function CreateRecipeScreen() {
                       keyboardShouldPersistTaps="always"
                       contentContainerStyle={{
                         paddingTop: 8,
-                        paddingLeft: 34, // align with text input (24px badge + 10px gap)
+                        paddingLeft: 34,
                         paddingRight: 4,
                         gap: 6,
                       }}
                     >
+                      {/* Live measurement badge — only shown when raw ≠ normalised (something to fix) */}
+                      {detectedMeasurement && detectedMeasurement.raw !== detectedMeasurement.normalised && (
+                        <TouchableOpacity
+                          onPress={() => {
+                            const current = watchedSteps[index]?.value ?? "";
+                            const normalized = current.replace(
+                              detectedMeasurement.raw,
+                              detectedMeasurement.normalised
+                            );
+                            if (normalized !== current) {
+                              setValue(`steps.${index}.value`, normalized);
+                            }
+                          }}
+                          activeOpacity={0.75}
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 3,
+                            backgroundColor: "#D1FAE5",
+                            borderRadius: 999,
+                            paddingHorizontal: 10,
+                            paddingVertical: 5,
+                          }}
+                        >
+                          <Ionicons name="scale-outline" size={13} color="#059669" />
+                          <Text style={{ fontSize: 12, fontWeight: "700", color: "#059669" }}>
+                            {detectedMeasurement.normalised}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      {/* Ingredient autocomplete chips */}
                       {suggestions.map((name) => (
                         <TouchableOpacity
                           key={name}
@@ -1236,7 +1414,7 @@ export default function CreateRecipeScreen() {
                             flexDirection: "row",
                             alignItems: "center",
                             gap: 4,
-                            backgroundColor: "#f3f4f6",
+                            backgroundColor: "#DBEAFE",
                             borderRadius: 999,
                             paddingHorizontal: 10,
                             paddingVertical: 5,
@@ -1245,13 +1423,13 @@ export default function CreateRecipeScreen() {
                           <Ionicons
                             name="add-circle-outline"
                             size={13}
-                            color="#6b7280"
+                            color="#1d4ed8"
                           />
                           <Text
                             style={{
                               fontSize: 12,
-                              color: "#374151",
-                              fontWeight: "500",
+                              color: "#1d4ed8",
+                              fontWeight: "600",
                             }}
                           >
                             {name}

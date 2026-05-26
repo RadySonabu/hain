@@ -19,26 +19,33 @@ import {
   extractMeasurement,
   segmentMeasurements,
 } from "@/lib/measurementDetection";
+import { segmentIngredients } from "@/lib/ingredientHighlight";
 
 export type SmartTextInputHandle = {
   focus: () => void;
 };
 
-// Extended segment that also carries a measurement tag
-type RichSegment = Segment & { isMeasurement?: boolean };
+// Extended segment carrying all highlight types
+type RichSegment = Segment & { isMeasurement?: boolean; isIngredient?: boolean };
 
 /**
- * Merges time segments and measurement segments into a single ordered list.
- * Time highlights take priority over measurement highlights when they overlap.
+ * Merges time, measurement, and ingredient segments into one ordered list.
+ * Priority: time (T) > measurement (M) > ingredient (I) on overlaps.
  */
-function mergeSegments(text: string, enableMeasurements: boolean): RichSegment[] {
-  if (!enableMeasurements) {
+function mergeSegments(
+  text: string,
+  enableMeasurements: boolean,
+  ingredientNames: string[]
+): RichSegment[] {
+  const hasIngredients = ingredientNames.length > 0;
+  if (!enableMeasurements && !hasIngredients) {
     return segmentText(text);
   }
 
-  // Build a per-character tag array: 'T' = time, 'M' = measurement, '' = plain
-  const tags = new Array<"T" | "M" | "">(text.length).fill("");
+  // Per-character tag: 'T' = time, 'M' = measurement, 'I' = ingredient, '' = plain
+  const tags = new Array<"T" | "M" | "I" | "">(text.length).fill("");
 
+  // Time — highest priority
   const timeSegs = segmentText(text);
   let pos = 0;
   for (const seg of timeSegs) {
@@ -48,15 +55,32 @@ function mergeSegments(text: string, enableMeasurements: boolean): RichSegment[]
     pos += seg.text.length;
   }
 
-  const measSegs = segmentMeasurements(text);
-  pos = 0;
-  for (const seg of measSegs) {
-    if (seg.isHighlight) {
-      for (let i = pos; i < pos + seg.text.length; i++) {
-        if (tags[i] === "") tags[i] = "M"; // time wins on overlap
+  // Measurement
+  if (enableMeasurements) {
+    const measSegs = segmentMeasurements(text);
+    pos = 0;
+    for (const seg of measSegs) {
+      if (seg.isHighlight) {
+        for (let i = pos; i < pos + seg.text.length; i++) {
+          if (tags[i] === "") tags[i] = "M";
+        }
       }
+      pos += seg.text.length;
     }
-    pos += seg.text.length;
+  }
+
+  // Ingredient — lowest priority
+  if (hasIngredients) {
+    const ingSegs = segmentIngredients(text, ingredientNames);
+    pos = 0;
+    for (const seg of ingSegs) {
+      if (seg.isHighlight) {
+        for (let i = pos; i < pos + seg.text.length; i++) {
+          if (tags[i] === "") tags[i] = "I";
+        }
+      }
+      pos += seg.text.length;
+    }
   }
 
   // Collapse into runs
@@ -70,6 +94,7 @@ function mergeSegments(text: string, enableMeasurements: boolean): RichSegment[]
       text: text.slice(i, j),
       isHighlight: tag === "T",
       isMeasurement: tag === "M",
+      isIngredient: tag === "I",
     });
     i = j;
   }
@@ -81,12 +106,14 @@ type Props = {
   onChangeText: (text: string) => void;
   onTimeDetected?: (seconds: number | null) => void;
   enableMeasurements?: boolean;
+  ingredientNames?: string[];
   placeholder?: string;
   multiline?: boolean;
   style?: StyleProp<TextStyle>;
   returnKeyType?: ReturnKeyType;
   blurOnSubmit?: boolean;
   onFocus?: () => void;
+  onBlur?: () => void;
   onSubmitEditing?: () => void;
 };
 
@@ -97,12 +124,14 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
       onChangeText,
       onTimeDetected,
       enableMeasurements = false,
+      ingredientNames = [],
       placeholder,
       multiline,
       style,
       returnKeyType,
       blurOnSubmit,
       onFocus: onFocusProp,
+      onBlur: onBlurProp,
       onSubmitEditing,
     },
     ref
@@ -111,12 +140,11 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
     const [isFocused, setIsFocused] = useState(false);
     const [segments, setSegments] = useState<RichSegment[]>([]);
     const [detectedSeconds, setDetectedSeconds] = useState<number | null>(null);
-    const [detectedMeasurement, setDetectedMeasurement] = useState<string | null>(null);
 
     // If the input has a value but segments haven't been computed yet (e.g.
     // a prefilled value on first render), derive them directly from the prop.
     const viewSegments =
-      segments.length > 0 ? segments : mergeSegments(value, enableMeasurements);
+      segments.length > 0 ? segments : mergeSegments(value, enableMeasurements, ingredientNames);
 
     const hasTimeHighlight = viewSegments.some((s) => s.isHighlight);
     const hasMeasurementHighlight = viewSegments.some((s) => s.isMeasurement);
@@ -135,17 +163,14 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
       setIsFocused(false);
       if (!value.trim()) return;
 
-      const segs = mergeSegments(value, enableMeasurements);
+      const segs = mergeSegments(value, enableMeasurements, ingredientNames);
       setSegments(segs);
 
       const secs = extractTimeSeconds(value);
       setDetectedSeconds(secs);
       onTimeDetected?.(secs);
 
-      if (enableMeasurements) {
-        const m = extractMeasurement(value);
-        setDetectedMeasurement(m ? m.normalised : null);
-      }
+      onBlurProp?.();
     };
 
     const handleFocus = () => {
@@ -160,8 +185,16 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
       setTimeout(() => inputRef.current?.focus(), 50);
     };
 
-    // While editing — show normal TextInput
+    // While editing — show normal TextInput with live border colour
     if (isFocused || !value.trim()) {
+      const liveHasTime = !!extractTimeSeconds(value);
+      const liveHasMeasurement = enableMeasurements ? !!extractMeasurement(value) : false;
+      const liveBorderColor = liveHasTime
+        ? "#FDE68A"
+        : liveHasMeasurement
+        ? "#A7F3D0"
+        : "#e5e7eb";
+
       return (
         <TextInput
           ref={inputRef}
@@ -182,7 +215,7 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
               fontSize: 14,
               color: "#000",
               borderBottomWidth: 1,
-              borderBottomColor: "#e5e7eb",
+              borderBottomColor: liveBorderColor,
               paddingBottom: 8,
               textAlignVertical: multiline ? "top" : "center",
             },
@@ -221,13 +254,7 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
                 return (
                   <Text
                     key={i}
-                    style={{
-                      backgroundColor: "#FEF3C7",
-                      color: "#D97706",
-                      fontWeight: "600",
-                      borderRadius: 3,
-                      overflow: "hidden",
-                    }}
+                    style={{ color: "#D97706", fontWeight: "700" }}
                   >
                     {seg.text}
                   </Text>
@@ -237,13 +264,17 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
                 return (
                   <Text
                     key={i}
-                    style={{
-                      backgroundColor: "#D1FAE5",
-                      color: "#059669",
-                      fontWeight: "600",
-                      borderRadius: 3,
-                      overflow: "hidden",
-                    }}
+                    style={{ color: "#059669", fontWeight: "700" }}
+                  >
+                    {seg.text}
+                  </Text>
+                );
+              }
+              if (seg.isIngredient) {
+                return (
+                  <Text
+                    key={i}
+                    style={{ color: "#1d4ed8", fontWeight: "700" }}
                   >
                     {seg.text}
                   </Text>
@@ -274,26 +305,6 @@ const SmartTextInput = forwardRef<SmartTextInputHandle, Props>(
             </View>
           )}
 
-          {/* Measurement badge */}
-          {detectedMeasurement !== null && (
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 3,
-                backgroundColor: "#D1FAE5",
-                borderRadius: 999,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-                alignSelf: "flex-start",
-              }}
-            >
-              <Ionicons name="scale-outline" size={12} color="#059669" />
-              <Text style={{ fontSize: 11, fontWeight: "700", color: "#059669" }}>
-                {detectedMeasurement}
-              </Text>
-            </View>
-          )}
         </View>
       </TouchableOpacity>
     );

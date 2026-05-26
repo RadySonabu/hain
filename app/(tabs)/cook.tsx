@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
+  Modal,
   ScrollView,
   Text,
   TextInput,
@@ -9,11 +10,63 @@ import {
   View,
 } from "react-native";
 import { Image } from "expo-image";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import { RECIPES, Recipe } from "@/lib/mockData";
 import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
+import { useModelStatus } from "@/src/context/ModelContext";
+
+function OptionCard({
+  icon,
+  title,
+  subtitle,
+  onPress,
+  disabled,
+}: {
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.75}
+      disabled={disabled}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 14,
+        paddingVertical: 14,
+        borderBottomWidth: 0.5,
+        borderBottomColor: "#f3f4f6",
+        opacity: disabled ? 0.42 : 1,
+      }}
+    >
+      <View
+        style={{
+          width: 48,
+          height: 48,
+          borderRadius: 12,
+          backgroundColor: "#f3f4f6",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Ionicons name={icon} size={24} color="#374151" />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={{ fontSize: 16, fontWeight: "600", color: "#000", marginBottom: 2 }}>
+          {title}
+        </Text>
+        <Text style={{ fontSize: 13, color: "#9ca3af" }}>{subtitle}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color="#d1d5db" />
+    </TouchableOpacity>
+  );
+}
 
 const CATEGORIES = ["All", "Breakfast", "Pasta", "Vegan", "Quick", "Dessert"];
 
@@ -140,9 +193,18 @@ function RecipeListRow({
 
 export default function CookScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { modelReady } = useModelStatus();
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [userRecipes, setUserRecipes] = useState<Recipe[]>([]);
+  const [showSheet, setShowSheet] = useState(false);
+
+  const openAndGo = (path: string) => {
+    setShowSheet(false);
+    // Small delay so the sheet closes before the new screen pushes
+    setTimeout(() => router.push(path as any), 150);
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -239,7 +301,7 @@ export default function CookScreen() {
           Cook
         </Text>
         <TouchableOpacity
-          onPress={() => router.push("/add-recipe")}
+          onPress={() => setShowSheet(true)}
           style={{
             width: 36,
             height: 36,
@@ -346,6 +408,86 @@ export default function CookScreen() {
           />
         )}
       </View>
+
+      {/* Add Recipe bottom sheet */}
+      <Modal
+        visible={showSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowSheet(false)}
+      >
+        {/* Backdrop */}
+        <TouchableOpacity
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)" }}
+          activeOpacity={1}
+          onPress={() => setShowSheet(false)}
+        />
+
+        {/* Sheet card */}
+        <View
+          style={{
+            backgroundColor: "#fff",
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            paddingHorizontal: 20,
+            paddingBottom: insets.bottom + 12,
+          }}
+        >
+          {/* Drag handle */}
+          <View style={{ alignItems: "center", paddingVertical: 10 }}>
+            <View
+              style={{
+                width: 36,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: "#e5e7eb",
+              }}
+            />
+          </View>
+
+          <Text
+            style={{
+              fontSize: 17,
+              fontWeight: "700",
+              color: "#000",
+              marginBottom: 4,
+              paddingBottom: 8,
+            }}
+          >
+            Add Recipe
+          </Text>
+
+          <OptionCard
+            icon="create-outline"
+            title="Manual"
+            subtitle="Fill in the details yourself"
+            onPress={() => openAndGo("/create-recipe")}
+          />
+          <OptionCard
+            icon="link-outline"
+            title="From URL"
+            subtitle="Import from any recipe website"
+            onPress={() => openAndGo("/create-recipe-url")}
+          />
+          <OptionCard
+            icon="phone-portrait-outline"
+            title="Social / Screenshot"
+            subtitle="From Instagram, TikTok, or a photo"
+            onPress={() => openAndGo("/create-recipe-social")}
+          />
+          <OptionCard
+            icon="sparkles-outline"
+            title="Describe with text"
+            subtitle={
+              modelReady
+                ? "Type a recipe — on-device AI fills the form"
+                : "Download AI model in Settings to use"
+            }
+            onPress={() => openAndGo("/describe-recipe")}
+            disabled={!modelReady}
+          />
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
