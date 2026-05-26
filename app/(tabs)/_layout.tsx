@@ -1,7 +1,10 @@
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { useShoppingList } from "@/src/context/ShoppingListContext";
 
 export default function TabLayout() {
+  const { uncheckedCount } = useShoppingList();
+
   return (
     <Tabs
       screenOptions={{
@@ -46,6 +49,8 @@ export default function TabLayout() {
           tabBarIcon: ({ color, focused }) => (
             <Ionicons name={focused ? "bag-handle" : "bag-handle-outline"} size={26} color={color} />
           ),
+          tabBarBadge: uncheckedCount > 0 ? uncheckedCount : undefined,
+          tabBarBadgeStyle: { backgroundColor: "#ef4444", fontSize: 10 },
         }}
       />
     </Tabs>

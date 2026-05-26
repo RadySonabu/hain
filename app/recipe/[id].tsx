@@ -19,6 +19,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { RECIPES, Recipe, RecipeStep } from "@/lib/mockData";
 import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
 import { extractMeasurement, extractLeadingCount } from "@/lib/measurementDetection";
+import { computeIngredientUsage, formatUsageBadge } from "@/lib/ingredientUsage";
+import { useShoppingList } from "@/src/context/ShoppingListContext";
 import { buildIngredientNames, segmentIngredients } from "@/lib/ingredientHighlight";
 import * as Notifications from "expo-notifications";
 import * as Haptics from "expo-haptics";
@@ -704,6 +706,7 @@ export default function RecipeDetailScreen() {
   const insets = useSafeAreaInsets();
   const [saved, setSaved] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
+  const [addedToList, setAddedToList] = useState(false);
   const [recipe, setRecipe] = useState<Recipe | undefined>(
     RECIPES.find((r) => r.id === id)
   );
@@ -730,6 +733,20 @@ export default function RecipeDetailScreen() {
       },
     ]);
   };
+
+  const { addRecipeIngredients } = useShoppingList();
+
+  // Compute ingredient usage across all recipe steps (for static ingredient list)
+  const ingredientUsage = useMemo(
+    () =>
+      recipe
+        ? computeIngredientUsage(
+            recipe.ingredients,
+            recipe.steps.map((s) => s.text)
+          )
+        : [],
+    [recipe]
+  );
 
   const handleEdit = () => {
     if (!recipe) return;
@@ -978,16 +995,49 @@ export default function RecipeDetailScreen() {
             {/* Ingredients — inline */}
             {recipe.ingredients.length > 0 && (
               <>
-                <Text
+                {/* Header row: title + Add to Shopping List button */}
+                <View
                   style={{
-                    fontSize: 17,
-                    fontWeight: "700",
-                    color: "#000",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
                     marginBottom: 14,
                   }}
                 >
-                  Ingredients
-                </Text>
+                  <Text style={{ fontSize: 17, fontWeight: "700", color: "#000" }}>
+                    Ingredients
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      if (addedToList) return;
+                      addRecipeIngredients(
+                        recipe.id,
+                        recipe.title,
+                        recipe.ingredients
+                      );
+                      setAddedToList(true);
+                    }}
+                    activeOpacity={addedToList ? 1 : 0.8}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 5,
+                      backgroundColor: addedToList ? "#d1d5db" : "#000",
+                      borderRadius: 20,
+                      paddingHorizontal: 12,
+                      paddingVertical: 7,
+                    }}
+                  >
+                    <Ionicons
+                      name={addedToList ? "checkmark" : "cart-outline"}
+                      size={14}
+                      color={addedToList ? "#6b7280" : "#fff"}
+                    />
+                    <Text style={{ color: addedToList ? "#6b7280" : "#fff", fontWeight: "700", fontSize: 12 }}>
+                      {addedToList ? "Added to list" : "Add to list"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
                 {recipe.ingredients.map((ing, i) => {
                   const { name, measurement } = splitIngredient(ing);
                   return (
@@ -1036,9 +1086,49 @@ export default function RecipeDetailScreen() {
                           </Text>
                         </View>
                       )}
+                      {/* Usage pill — shows remaining qty based on step references */}
+                      {(() => {
+                        const badge = formatUsageBadge(ingredientUsage[i]);
+                        if (!badge) return null;
+                        const isDone = badge === "✓";
+                        return (
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              alignItems: "center",
+                              gap: 3,
+                              backgroundColor: isDone ? "#D1FAE5" : "#FEF3C7",
+                              borderRadius: 999,
+                              paddingHorizontal: 8,
+                              paddingVertical: 3,
+                              flexShrink: 0,
+                            }}
+                          >
+                            <Ionicons
+                              name={
+                                isDone
+                                  ? "checkmark-circle-outline"
+                                  : "arrow-down-outline"
+                              }
+                              size={11}
+                              color={isDone ? "#059669" : "#D97706"}
+                            />
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                fontWeight: "700",
+                                color: isDone ? "#059669" : "#D97706",
+                              }}
+                            >
+                              {isDone ? "done" : badge}
+                            </Text>
+                          </View>
+                        );
+                      })()}
                     </View>
                   );
                 })}
+
               </>
             )}
           </View>

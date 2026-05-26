@@ -11,6 +11,7 @@ import "react-native-reanimated";
 
 import { useColorScheme } from "@/hooks/useColorScheme";
 import { ModelProvider } from "@/src/context/ModelContext";
+import { ShoppingListProvider } from "@/src/context/ShoppingListContext";
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -23,6 +24,7 @@ export default function RootLayout() {
   }
 
   return (
+    <ShoppingListProvider>
     <ModelProvider>
       <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
         <Stack>
@@ -38,5 +40,6 @@ export default function RootLayout() {
         <StatusBar style="dark" />
       </ThemeProvider>
     </ModelProvider>
+    </ShoppingListProvider>
   );
 }

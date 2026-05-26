@@ -27,6 +27,7 @@ import type { IngredientField, RecipeFormValues } from "@/src/types/recipe";
 import { stripMeasurement, extractMeasurement } from "@/lib/measurementDetection";
 import { buildIngredientNames } from "@/lib/ingredientHighlight";
 import { INGREDIENT_MEASUREMENTS, FALLBACK_MEASUREMENTS } from "@/lib/commonIngredients";
+import { computeIngredientUsage, formatUsageBadge } from "@/lib/ingredientUsage";
 
 // ─────────────────────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -288,6 +289,16 @@ export default function CreateRecipeScreen() {
   const stepIngredientNames = useMemo(
     () => buildIngredientNames((watchedIngredients ?? []).map((f) => f.value)),
     [watchedIngredients]
+  );
+
+  // Live ingredient usage: how much of each ingredient is referenced in steps
+  const ingredientUsage = useMemo(
+    () =>
+      computeIngredientUsage(
+        (watchedIngredients ?? []).map((f) => f.value).filter(Boolean),
+        (watchedSteps ?? []).map((s) => s.value).filter(Boolean)
+      ),
+    [watchedIngredients, watchedSteps]
   );
 
   // ── Photo (not a form field) ─────────────────────────────────────────────
@@ -1094,6 +1105,26 @@ export default function CreateRecipeScreen() {
                     </TouchableOpacity>
                   )}
                 </View>
+
+                {/* Usage badge — shows remaining qty when steps reference this ingredient */}
+                {(() => {
+                  const badge = formatUsageBadge(ingredientUsage[index]);
+                  if (!badge) return null;
+                  const isDone = badge === "✓";
+                  return (
+                    <View style={{ paddingLeft: 18, paddingTop: 4 }}>
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: "600",
+                          color: isDone ? "#059669" : "#D97706",
+                        }}
+                      >
+                        {isDone ? "✓ fully accounted for" : badge}
+                      </Text>
+                    </View>
+                  );
+                })()}
 
                 {/* Bi-directional suggestion chips */}
                 {focusedIngredientIndex === index && (() => {

@@ -16,6 +16,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { RECIPES, Recipe } from "@/lib/mockData";
 import { getUserRecipes, deleteUserRecipe } from "@/lib/recipeStore";
 import { useModelStatus } from "@/src/context/ModelContext";
+import { useShoppingList } from "@/src/context/ShoppingListContext";
 
 function OptionCard({
   icon,
@@ -195,6 +196,7 @@ export default function CookScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { modelReady } = useModelStatus();
+  const { uncheckedCount } = useShoppingList();
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [userRecipes, setUserRecipes] = useState<Recipe[]>([]);
@@ -300,20 +302,51 @@ export default function CookScreen() {
         <Text style={{ fontSize: 24, fontWeight: "800", color: "#000" }}>
           Cook
         </Text>
-        <TouchableOpacity
-          onPress={() => setShowSheet(true)}
-          style={{
-            width: 36,
-            height: 36,
-            backgroundColor: "#000",
-            borderRadius: 999,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="add" size={22} color="#fff" />
-        </TouchableOpacity>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          {/* Cart icon — navigates to shopping list */}
+          <TouchableOpacity
+            onPress={() => router.push("/(tabs)/shop")}
+            style={{ position: "relative", padding: 4 }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="cart-outline" size={26} color="#000" />
+            {uncheckedCount > 0 && (
+              <View
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  right: 0,
+                  backgroundColor: "#ef4444",
+                  borderRadius: 8,
+                  minWidth: 16,
+                  height: 16,
+                  justifyContent: "center",
+                  alignItems: "center",
+                  paddingHorizontal: 3,
+                }}
+              >
+                <Text style={{ color: "#fff", fontSize: 10, fontWeight: "700" }}>
+                  {uncheckedCount}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          {/* Add recipe button */}
+          <TouchableOpacity
+            onPress={() => setShowSheet(true)}
+            style={{
+              width: 36,
+              height: 36,
+              backgroundColor: "#000",
+              borderRadius: 999,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="add" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Search bar */}
